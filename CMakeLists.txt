@@ -36,7 +36,7 @@ add_executable(MyYtm
     src/platform/credentials/CredentialStoreWin.cpp
     src/platform/terminal/TerminalWin.cpp
     src/platform/http/WinHttpClient.cpp
-    src/platform/oauth_loopback.cpp
+    src/platform/oauth/OAuthLoopbackWin.cpp
     src/platform/audio_backend.cpp
 )
 
@@ -46,7 +46,7 @@ target_include_directories(MyYtm
 )
 
 if(WIN32)
-    target_link_libraries(MyYtm PRIVATE crypt32 shell32 winhttp ws2_32 winmm)
+    target_link_libraries(MyYtm PRIVATE crypt32 shell32 winhttp ws2_32 winmm bcrypt)
 endif()
 
 enable_testing()
@@ -77,17 +77,33 @@ add_executable(MyYtmUiTests
     src/platform/credentials/CredentialStoreWin.cpp
     src/platform/terminal/TerminalWin.cpp
     src/platform/http/WinHttpClient.cpp
-    src/platform/oauth_loopback.cpp
+    src/platform/oauth/OAuthLoopbackWin.cpp
     src/platform/audio_backend.cpp
 )
 
 target_include_directories(MyYtmUiTests PRIVATE src)
 
 if(WIN32)
-    target_link_libraries(MyYtmUiTests PRIVATE crypt32 shell32 winhttp ws2_32 winmm)
+    target_link_libraries(MyYtmUiTests PRIVATE crypt32 shell32 winhttp ws2_32 winmm bcrypt)
 endif()
 
 add_test(NAME UiTests COMMAND MyYtmUiTests)
+
+add_executable(MyYtmOAuthHardeningTests
+    tests/test_oauth_hardening.cpp
+    src/auth/credential_store.cpp
+    src/auth/auth_manager.cpp
+    src/platform/browser/BrowserLauncherWin.cpp
+    src/platform/crypto/CryptoWin.cpp
+    src/platform/credentials/CredentialStoreWin.cpp
+    src/platform/http/WinHttpClient.cpp
+    src/platform/oauth/OAuthLoopbackWin.cpp
+)
+target_include_directories(MyYtmOAuthHardeningTests PRIVATE src)
+if(WIN32)
+    target_link_libraries(MyYtmOAuthHardeningTests PRIVATE crypt32 shell32 winhttp ws2_32 bcrypt)
+endif()
+add_test(NAME OAuthHardeningTests COMMAND MyYtmOAuthHardeningTests)
 
 # Windows packaging (Phase 8) — ZIP + NSIS + MSI (WIX) with choosable install dir
 include(InstallRequiredSystemLibraries)
