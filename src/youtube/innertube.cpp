@@ -145,4 +145,14 @@ std::string buildHistoryBrowseBody(const InnertubeConfig& cfg, std::optional<std
     return buildBrowseBody(cfg, "FEmusic_history", std::nullopt, continuation);
 }
 
+std::string buildPlayerBody(const InnertubeConfig& cfg, std::string_view videoId, std::optional<std::string_view> playlistId) {
+    std::ostringstream oss;
+    oss << "{" << buildInnertubeContextJson(cfg) << ",";
+    oss << "\"videoId\":\"" << jsonEscape(videoId) << "\"";
+    if (playlistId && !playlistId->empty()) oss << ",\"playlistId\":\"" << jsonEscape(*playlistId) << "\"";
+    oss << ",\"racyCheckOk\":true,\"contentCheckOk\":true";
+    oss << "}";
+    return oss.str();
+}
+
 } // namespace myytm::youtube

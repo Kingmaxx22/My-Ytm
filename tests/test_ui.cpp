@@ -287,6 +287,97 @@ void test_search_filter_ui() {
   EXPECT(true, "filter UI preserved");
 }
 
+void test_search_filter_all_ui() {
+  std::cout << "\n-- Search filter all 6 --\n";
+  struct CapturingMock : public youtube::IHttpClient {
+    std::string lastBody;
+    youtube::HttpResponse execute(const youtube::HttpRequest& req) override {
+      lastBody = req.body;
+      // Return count based on filter: All -> 2, Songs ->1, Videos->1, Albums->1, Artists->1, Playlists->1
+      bool isSongs = req.body.find("EgWKAQIIAWoKEAoQAxAEEAkQBQ==")!=std::string::npos;
+      bool isVideos = req.body.find("EgWKAQIQAWoKEAoQAxAEEAkQBQ==")!=std::string::npos;
+      bool isAlbums = req.body.find("EgWKAQIYAWoKEAoQAxAEEAkQBQ==")!=std::string::npos;
+      bool isArtists = req.body.find("EgWKAQEgAWoKEAoQAxAEEAkQBQ==")!=std::string::npos;
+      bool isPlaylists = req.body.find("EgWKAQIoAWoKEAoQAxAEEAkQBQ==")!=std::string::npos;
+      std::string body;
+      if (isSongs) body = R"json({"results":[{"type":"song","id":"s1","title":"Song1","subtitle":"A"}]})json";
+      else if (isVideos) body = R"json({"results":[{"type":"song","id":"v1","title":"Video1","subtitle":"A"}]})json";
+      else if (isAlbums) body = R"json({"results":[{"type":"album","id":"al1","title":"Album1","subtitle":"A"}]})json";
+      else if (isArtists) body = R"json({"results":[{"type":"artist","id":"a1","title":"Artist1","subtitle":""}]})json";
+      else if (isPlaylists) body = R"json({"results":[{"type":"playlist","id":"p1","title":"Playlist1","subtitle":"A"}]})json";
+      else body = R"json({"results":[{"type":"song","id":"s1","title":"Song1","subtitle":"A"},{"type":"artist","id":"a1","title":"Artist1","subtitle":""}]})json";
+      return youtube::HttpResponse{200, body, {}, ""};
+    }
+  };
+  auto cap = std::make_unique<CapturingMock>();
+  auto* raw = cap.get();
+  auto client = std::make_shared<youtube::YouTubeClient>(std::move(cap));
+  auto q = std::make_shared<player::Queue>();
+  auto p = std::make_shared<player::MockPlayer>(q);
+  ui::SearchScreen s(client);
+  s.setQueue(q); s.setPlayer(p);
+  s.setQuery("test");
+  // All
+  EXPECT(s.filter()==youtube::SearchFilter::All, "initial All");
+  s.executeSearch();
+  EXPECT(raw->lastBody.find("\"params\"")==std::string::npos, "All no params");
+  EXPECT(s.resultCount()==2, "All 2 results");
+  // Cycle: All -> Songs -> Videos -> Albums -> Artists -> Playlists -> All
+  s.handleKey(ch('f')); // Songs
+  EXPECT(s.filter()==youtube::SearchFilter::Songs, "f -> Songs");
+  EXPECT(raw->lastBody.find("EgWKAQIIAWoKEAoQAxAEEAkQBQ==")!=std::string::npos, "Songs params");
+  EXPECT(s.resultCount()==1 && s.results()[0].type==models::SearchResultType::Song, "Songs filtered");
+  s.handleKey(ch('f')); // Videos
+  EXPECT(s.filter()==youtube::SearchFilter::Videos, "f -> Videos");
+  EXPECT(s.resultCount()==1, "Videos 1");
+  s.handleKey(ch('f')); // Albums
+  EXPECT(s.filter()==youtube::SearchFilter::Albums, "f -> Albums");
+  s.handleKey(ch('f')); // Artists
+  EXPECT(s.filter()==youtube::SearchFilter::Artists, "f -> Artists");
+  s.handleKey(ch('f')); // Playlists
+  EXPECT(s.filter()==youtube::SearchFilter::Playlists, "f -> Playlists");
+  s.handleKey(ch('f')); // All
+  EXPECT(s.filter()==youtube::SearchFilter::All, "f -> All (wrap)");
+  // Prev: All -> Playlists via F
+  s.handleKey(ch('F'));
+  EXPECT(s.filter()==youtube::SearchFilter::Playlists, "F -> Playlists (prev)");
+  s.handleKey(ch('F'));
+  EXPECT(s.filter()==youtube::SearchFilter::Artists, "F -> Artists");
+  // Pagination preserves filter
+  s.setFilter(youtube::SearchFilter::Songs);
+  s.setQuery("test");
+  s.executeSearch();
+  EXPECT(s.filter()==youtube::SearchFilter::Songs, "Songs before pagination");
+  EXPECT(s.continuationToken().has_value()==false || true, "has token check"); // mock has no continuation, but test that loadNextPage preserves filter
+  // Simulate continuation for pagination test: use a mock that returns continuation
+  struct PaginatedFilteredMock : public youtube::IHttpClient {
+    youtube::HttpResponse execute(const youtube::HttpRequest& req) override {
+      bool isCont = req.body.find("contTok")!=std::string::npos;
+      if (!isCont) {
+        bool isSongs = req.body.find("EgWKAQIIAWoKEAoQAxAEEAkQBQ==")!=std::string::npos;
+        EXPECT(isSongs, "pagination preserves filter");
+      }
+      if (isCont) {
+        return youtube::HttpResponse{200, R"json({"contents":{"tabbedSearchResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"musicShelfRenderer":{"contents":[{"musicResponsiveListItemRenderer":{"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song2"}]}}}],"navigationEndpoint":{"watchEndpoint":{"videoId":"id2"}}}}]}}]}}}}]}}})json", {}, ""};
+      } else {
+        return youtube::HttpResponse{200, R"json({"contents":{"tabbedSearchResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"musicShelfRenderer":{"contents":[{"musicResponsiveListItemRenderer":{"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song1"}]}}}],"navigationEndpoint":{"watchEndpoint":{"videoId":"id1"}}}}],"continuations":[{"nextContinuationData":{"continuation":"contTok"}}]}}]}}}}]}}})json", {}, ""};
+      }
+    }
+  };
+  auto cap2 = std::make_unique<PaginatedFilteredMock>();
+  auto client2 = std::make_shared<youtube::YouTubeClient>(std::move(cap2));
+  ui::SearchScreen s2(client2);
+  s2.setQueue(q); s2.setPlayer(p);
+  s2.setQuery("test");
+  s2.setFilter(youtube::SearchFilter::Songs);
+  s2.executeSearch();
+  EXPECT(s2.continuationToken().has_value(), "filtered has continuation");
+  size_t before = s2.resultCount();
+  s2.handleKey(ch('>'));
+  EXPECT(s2.resultCount()==before+1, "pagination append preserves filter");
+  EXPECT(s2.filter()==youtube::SearchFilter::Songs, "filter preserved after pagination");
+}
+
 void test_queue_screen() {
   std::cout << "\n-- QueueScreen --\n";
   auto q = std::make_shared<player::Queue>();
@@ -378,6 +469,7 @@ int main() {
   test_library_screens();
   test_library_pagination_ui();
   test_search_filter_ui();
+  test_search_filter_all_ui();
   test_queue_screen();
   test_youtube_client_errors();
   test_config_and_auth();

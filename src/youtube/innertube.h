@@ -30,6 +30,7 @@ std::string buildBrowseBody(const InnertubeConfig& cfg, std::string_view browseI
 std::string buildLibraryBrowseBody(const InnertubeConfig& cfg, std::optional<std::string_view> continuation = std::nullopt);
 std::string buildPlaylistsBrowseBody(const InnertubeConfig& cfg, std::optional<std::string_view> continuation = std::nullopt);
 std::string buildHistoryBrowseBody(const InnertubeConfig& cfg, std::optional<std::string_view> continuation = std::nullopt);
+std::string buildPlayerBody(const InnertubeConfig& cfg, std::string_view videoId, std::optional<std::string_view> playlistId = std::nullopt);
 
 // JSON escaping for request bodies (query, browseId, etc.)
 std::string jsonEscape(std::string_view s);

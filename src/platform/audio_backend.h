@@ -2,42 +2,47 @@
 #include "player/player.h"
 #include "player/queue.h"
 #include "models/playback_state.h"
+#include "miniaudio.h"
 #include <memory>
 #include <atomic>
-#include <thread>
+#include <cstdint>
+#include <deque>
 #include <mutex>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <mmsystem.h>
-#endif
+#include <vector>
 
 namespace myytm::platform {
 
 // Real audio backend — isolated in platform layer per AGENTS.md.
-// Uses WinMM waveOut to emit a demo tone (440Hz sine) when playing.
-// This proves the Player→Platform→Audio chain without requiring YouTube stream decipher
-// (which would violate ToS). Swapping to miniaudio/FFmpeg decoders only changes this file.
+// PCM output via miniaudio (WASAPI on Windows). Decoded streams arrive through
+// playPcm(); startTone() synthesizes a sine into the same PCM path and exists
+// only as a self-test/legacy placeholder for the pre-decoder player path.
+// Raw sample signature (no player-layer types) keeps the Platform layer
+// dependency-free per the layered architecture.
 class WinAudioBackend {
 public:
     WinAudioBackend() = default;
     ~WinAudioBackend();
 
-    bool startTone(int freqHz = 440, int durationMs = -1); // -1 = indefinite until stop
+    // Interleaved s16 PCM. Reinitializes the device when rate/channels change.
+    // loop=true replays the buffer until stop() (used by startTone).
+    bool playPcm(const int16_t* samples, size_t sampleCount, uint32_t sampleRateHz,
+                 uint16_t channels, bool loop = false);
+    bool startTone(int freqHz = 440, int durationMs = -1); // -1 = looped until stop
     void stop();
     void setVolume(int vol01); // 0-100
     [[nodiscard]] bool isPlaying() const noexcept { return playing_; }
 
 private:
-    void toneThread(int freqHz);
+    static void deviceCallback(ma_device* device, void* output, const void* input, ma_uint32 frameCount);
+    void stopDeviceLocked();
     std::atomic<bool> playing_{false};
-    std::atomic<bool> stopRequested_{false};
-    std::thread thread_;
     std::mutex mutex_;
     int volume_ = 50;
-#ifdef _WIN32
-    HWAVEOUT hWaveOut_ = nullptr;
-#endif
+    ma_device device_{};
+    bool deviceInit_ = false;
+    std::deque<int16_t> fifo_;
+    std::vector<int16_t> loopBuf_;
+    bool loop_ = false;
 };
 
 // Player implementation backed by WinAudioBackend + Queue.
@@ -60,6 +65,8 @@ public:
     [[nodiscard]] bool isPlaying() const noexcept override;
 
     [[nodiscard]] std::shared_ptr<player::Queue> queue() const noexcept { return queue_; }
+    // PCM sink target for StreamAudioPipeline (app wiring). Lifetime: owned by this player.
+    [[nodiscard]] WinAudioBackend* audioBackend() noexcept { return &backend_; }
 
 private:
     void syncTrack();

@@ -7,6 +7,7 @@
 #include "platform/audio_backend.h"
 #include "player/mock_player.h"
 #include "player/queue.h"
+#include "player/stream_player.h"
 #include "ui/auth_screen.h"
 #include "ui/help_screen.h"
 #include "ui/history_screen.h"
@@ -76,8 +77,7 @@ int App::run()
     // Platform layer → WinHTTP → OAuth loopback → YouTube API → Audio
     // Player / Queue — real audio backend (WinMM waveOut) isolated in src/platform per AGENTS.md
     auto queue = std::make_shared<player::Queue>();
-    std::shared_ptr<player::Player> player = std::make_shared<platform::PlatformAudioPlayer>(queue);
-    player->setVolume(cfgMgr.get().volume);
+    auto platformPlayer = std::make_shared<platform::PlatformAudioPlayer>(queue);
 
     // YouTubeClient — InnerTube POST with API key + client context, auth header, fallback mock offline
     auto ytClient = std::make_shared<youtube::YouTubeClient>(std::make_unique<youtube::WinHttpClient>());
@@ -93,6 +93,34 @@ int App::run()
         if (icfg.clientName != "WEB_REMIX") logger.warn("Unexpected Innertube clientName: " + icfg.clientName);
         ytClient->setInnertubeConfig(icfg);
     }
+
+    // StreamPlayer: resolves the current queue song to an audio stream URL and
+    // drives the platform audio output. Transport/volume delegate unchanged.
+    auto streamPlayer = std::make_shared<player::StreamPlayer>(queue, ytClient, platformPlayer);
+    std::shared_ptr<player::Player> player = streamPlayer;
+    player->setVolume(cfgMgr.get().volume);
+
+    // Real-audio path: fetch resolved stream -> miniaudio decode -> PCM sink
+    // on the platform backend. Sanitized pipeline events go to the app log
+    // (itag/mime/byte counts only — never URLs, tokens, or keys).
+    platform::WinAudioBackend* pcmBackend = platformPlayer->audioBackend();
+    auto streamFetcher = std::make_shared<youtube::WinHttpClient>();
+    auto audioPipeline = std::make_shared<player::StreamAudioPipeline>(
+        [streamFetcher](const std::string& url) {
+            youtube::HttpRequest req;
+            req.url = url;
+            req.method = "GET";
+            req.timeout = std::chrono::milliseconds{15000};
+            return streamFetcher->execute(req);
+        },
+        [pcmBackend](const player::PcmAudio& pcm) {
+            return pcmBackend->playPcm(pcm.samples.data(), pcm.samples.size(),
+                                       pcm.sampleRateHz, pcm.channels);
+        },
+        [pcmBackend]() { pcmBackend->stop(); });
+    audioPipeline->setLogSink([&logger](const std::string& m) { logger.info(std::string("Audio: ") + m); });
+    streamPlayer->setLogSink([&logger](const std::string& m) { logger.info(std::string("Playback: ") + m); });
+    streamPlayer->setStreamPipeline(audioPipeline);
 
     // Screens: 0=Home,1=Search,2=Library(pl),3=Playlists(pl),4=History(pl),5=Account,6=Queue
     std::vector<std::unique_ptr<Screen>> screens;

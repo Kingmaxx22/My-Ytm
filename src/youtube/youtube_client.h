@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models/search_result.h"
+#include "models/stream_info.h"
 #include "youtube/http_client.h"
 #include "youtube/innertube.h"
 #include "youtube/result.h"
@@ -36,12 +37,20 @@ public:
     [[nodiscard]] Result<SearchPage> getPlaylistsPage(std::optional<std::string_view> continuation = std::nullopt);
     [[nodiscard]] Result<SearchPage> getHistoryPage(std::optional<std::string_view> continuation = std::nullopt);
 
+    // Playback resolution: videoId -> playable audio stream info (no audio backend coupling).
+    // Non-playable videos map to user-facing errors (Auth for sign-in/age-gated, NotFound otherwise).
+    [[nodiscard]] Result<models::PlaybackResolution> resolvePlayback(std::string_view videoId, std::optional<std::string_view> playlistId = std::nullopt);
+
     // Exposed for validation tests — parses untrusted JSON.
     [[nodiscard]] static Result<models::SearchResults> parseSearchResponse(std::string_view body);
     [[nodiscard]] static Result<SearchPage> parseSearchPage(std::string_view body);
     [[nodiscard]] static Result<SearchPage> parseLibraryPage(std::string_view body);
     [[nodiscard]] static Result<SearchPage> parsePlaylistsPage(std::string_view body);
     [[nodiscard]] static Result<SearchPage> parseHistoryPage(std::string_view body);
+    [[nodiscard]] static Result<models::PlaybackResolution> parsePlayerResponse(std::string_view videoId, std::string_view body);
+    // Best audio-only pick from usable streams: codec rank (opus > mp4a > vorbis > other),
+    // then bitrate desc, then lower itag. Returns nullopt when no usable stream exists.
+    [[nodiscard]] static std::optional<models::AudioStream> selectBestAudioStream(const std::vector<models::AudioStream>& streams);
 
     IHttpClient* httpClient() const noexcept { return http_.get(); }
     void setAuthHeaderProvider(std::function<std::optional<std::string>()> provider) { authHeaderProvider_ = std::move(provider); }

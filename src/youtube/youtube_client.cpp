@@ -1,3 +1,4 @@
+
 #include "youtube/youtube_client.h"
 #include "youtube/json.h"
 
@@ -268,16 +269,113 @@ std::optional<models::SearchResult> tryParseTwoRowItem(const json::JsonValue& re
     return res;
 }
 
+std::optional<models::SearchResult> tryParsePlaylistRenderer(const json::JsonValue& renderer) {
+    std::string id;
+    if (auto pid = json::getString(renderer, "playlistId")) id = *pid;
+    if (id.empty()) return std::nullopt;
+
+    std::string title;
+    if (auto* t = renderer.get("title")) title = json::extractRunsText(t);
+    if (title.empty()) return std::nullopt;
+
+    std::string author;
+    if (auto* a = renderer.get("shortBylineText")) author = json::extractRunsText(a);
+    else if (auto* a2 = renderer.get("longBylineText")) author = json::extractRunsText(a2);
+
+    std::optional<std::string> thumb;
+    if (auto* th = renderer.get("thumbnailRenderer")) thumb = json::extractThumbnail(th);
+
+    size_t trackCount = 0;
+    // videoCountShort / videoCount can be: string, number, or text node with runs
+    auto extractCount = [&](const json::JsonValue* node) -> bool {
+        if (!node) return false;
+        if (node->isNumber()) { trackCount = static_cast<size_t>(node->asNumber()); return true; }
+        std::string text;
+        if (node->isObject()) text = json::extractRunsText(node);
+        else if (node->isString()) text = node->asString();
+        if (text.empty()) return false;
+        std::string nums;
+        for (char c : text) if (std::isdigit(static_cast<unsigned char>(c))) nums.push_back(c);
+        if (!nums.empty()) { trackCount = std::stoull(nums); return true; }
+        return false;
+    };
+    if (!extractCount(renderer.get("videoCountShort")))
+        extractCount(renderer.get("videoCount"));
+
+    models::SearchResult res;
+    res.type = models::SearchResultType::Playlist;
+    res.id = id;
+    res.title = title;
+    res.subtitle = author;
+    res.payload = models::Playlist{id, title, author, trackCount};
+    return res;
+}
+
+std::optional<models::SearchResult> tryParsePlaylistItemRenderer(const json::JsonValue& renderer) {
+    // playlistItemRenderer: videoId, title (runs/simpleText), shortBylineText/longBylineText,
+    // lengthText (runs/simpleText), thumbnailRenderer/thumbnail.
+    std::string id;
+    if (auto vid = json::getString(renderer, "videoId")) id = *vid;
+    if (id.empty()) {
+        if (auto* nav = renderer.get("navigationEndpoint")) {
+            if (auto vid2 = findFirstString(*nav, "videoId")) id = *vid2;
+        }
+    }
+    if (id.empty()) {
+        if (auto vid3 = findFirstString(renderer, "videoId")) id = *vid3;
+    }
+    if (id.empty()) return std::nullopt;
+
+    std::string title;
+    if (auto* t = renderer.get("title")) title = json::extractRunsText(t);
+    if (title.empty()) return std::nullopt;
+
+    std::string author;
+    if (auto* a = renderer.get("shortBylineText")) author = json::extractRunsText(a);
+    if (author.empty()) {
+        if (auto* a2 = renderer.get("longBylineText")) author = json::extractRunsText(a2);
+    }
+
+    std::optional<int> duration;
+    if (auto* lt = renderer.get("lengthText")) {
+        std::string durStr = json::extractRunsText(lt);
+        if (!durStr.empty()) duration = json::parseDuration(durStr);
+    }
+
+    std::optional<std::string> thumb;
+    if (auto* th = renderer.get("thumbnailRenderer")) thumb = json::extractThumbnail(th);
+    if (!thumb) {
+        if (auto* th2 = renderer.get("thumbnail")) thumb = json::extractThumbnail(th2);
+    }
+
+    models::SearchResult res;
+    res.type = models::SearchResultType::Song;
+    res.id = id;
+    res.title = title;
+    res.subtitle = author;
+    models::Song s; s.id=id; s.title=title; s.artist=author; s.durationSeconds=duration; s.thumbnailUrl=thumb;
+    res.payload = s;
+    return res;
+}
+
 YouTubeClient::SearchPage parseInnerTubePage(const json::JsonValue& root) {
     YouTubeClient::SearchPage page;
-    std::vector<const json::JsonValue*> responsive, twoRow;
+    std::vector<const json::JsonValue*> responsive, twoRow, playlists, playlistItems;
     json::collectRenderers(root, "musicResponsiveListItemRenderer", responsive);
     json::collectRenderers(root, "musicTwoRowItemRenderer", twoRow);
+    json::collectRenderers(root, "playlistRenderer", playlists);
+    json::collectRenderers(root, "playlistItemRenderer", playlistItems);
     for (auto* r : responsive) {
         if (auto sr = tryParseResponsiveItem(*r)) page.results.push_back(std::move(*sr));
     }
     for (auto* r : twoRow) {
         if (auto sr = tryParseTwoRowItem(*r)) page.results.push_back(std::move(*sr));
+    }
+    for (auto* r : playlists) {
+        if (auto sr = tryParsePlaylistRenderer(*r)) page.results.push_back(std::move(*sr));
+    }
+    for (auto* r : playlistItems) {
+        if (auto sr = tryParsePlaylistItemRenderer(*r)) page.results.push_back(std::move(*sr));
     }
     if (auto tok = extractContinuationToken(root)) page.continuationToken = *tok;
     return page;
@@ -635,7 +733,9 @@ Result<YouTubeClient::SearchPage> YouTubeClient::parseSearchPage(std::string_vie
     // Strip XSSI prefix handled by json::parse
     // Try flat mock first if body looks like flat mock (contains "results" but not renderers)
     bool hasRenderers = body.find("musicResponsiveListItemRenderer") != std::string_view::npos ||
-                        body.find("musicTwoRowItemRenderer") != std::string_view::npos;
+                        body.find("musicTwoRowItemRenderer") != std::string_view::npos ||
+                        body.find("playlistRenderer") != std::string_view::npos ||
+                        body.find("playlistItemRenderer") != std::string_view::npos;
     if (!hasRenderers) {
         auto flat = parseSearchResponse(body);
         if (flat.isOk()) return Result<SearchPage>::ok(SearchPage{flat.value(), std::nullopt});
@@ -653,10 +753,13 @@ Result<YouTubeClient::SearchPage> YouTubeClient::parseLibraryPage(std::string_vi
     if (body.empty()) return Result<SearchPage>::err(Error::parse("Empty response"));
     bool hasRenderers = body.find("musicResponsiveListItemRenderer") != std::string_view::npos ||
                         body.find("musicTwoRowItemRenderer") != std::string_view::npos ||
+                        body.find("playlistRenderer") != std::string_view::npos ||
+                        body.find("playlistItemRenderer") != std::string_view::npos ||
                         body.find("gridRenderer") != std::string_view::npos;
     if (!hasRenderers) {
         auto flat = parseSearchResponse(body);
         if (flat.isOk()) return Result<SearchPage>::ok(SearchPage{flat.value(), std::nullopt});
+        if (body.find("\"results\"") != std::string_view::npos) return Result<SearchPage>::err(flat.error());
     }
     auto parsed = json::parse(body);
     if (!parsed.ok) return Result<SearchPage>::err(Error::parse(parsed.error));
@@ -664,7 +767,243 @@ Result<YouTubeClient::SearchPage> YouTubeClient::parseLibraryPage(std::string_vi
     auto page = parseInnerTubePage(parsed.value);
     return Result<SearchPage>::ok(std::move(page));
 }
-Result<YouTubeClient::SearchPage> YouTubeClient::parsePlaylistsPage(std::string_view body) { return parseLibraryPage(body); }
-Result<YouTubeClient::SearchPage> YouTubeClient::parseHistoryPage(std::string_view body) { return parseLibraryPage(body); }
+
+Result<YouTubeClient::SearchPage> YouTubeClient::parsePlaylistsPage(std::string_view body) {
+    if (body.empty()) return Result<SearchPage>::err(Error::parse("Empty response"));
+    bool hasRenderers = body.find("musicResponsiveListItemRenderer") != std::string_view::npos ||
+                        body.find("musicTwoRowItemRenderer") != std::string_view::npos ||
+                        body.find("playlistRenderer") != std::string_view::npos ||
+                        body.find("playlistItemRenderer") != std::string_view::npos ||
+                        body.find("gridRenderer") != std::string_view::npos;
+    if (!hasRenderers) {
+        auto flat = parseSearchResponse(body);
+        if (flat.isOk()) return Result<SearchPage>::ok(SearchPage{flat.value(), std::nullopt});
+        if (body.find("\"results\"") != std::string_view::npos) return Result<SearchPage>::err(flat.error());
+    }
+    auto parsed = json::parse(body);
+    if (!parsed.ok) return Result<SearchPage>::err(Error::parse(parsed.error));
+    if (auto apiErr = extractApiError(body)) return Result<SearchPage>::err(Error::parse(*apiErr));
+    auto page = parseInnerTubePage(parsed.value);
+    return Result<SearchPage>::ok(std::move(page));
+}
+
+Result<YouTubeClient::SearchPage> YouTubeClient::parseHistoryPage(std::string_view body) {
+    if (body.empty()) return Result<SearchPage>::err(Error::parse("Empty response"));
+    bool hasRenderers = body.find("musicResponsiveListItemRenderer") != std::string_view::npos ||
+                        body.find("musicTwoRowItemRenderer") != std::string_view::npos ||
+                        body.find("playlistRenderer") != std::string_view::npos ||
+                        body.find("playlistItemRenderer") != std::string_view::npos ||
+                        body.find("gridRenderer") != std::string_view::npos;
+    if (!hasRenderers) {
+        auto flat = parseSearchResponse(body);
+        if (flat.isOk()) return Result<SearchPage>::ok(SearchPage{flat.value(), std::nullopt});
+        if (body.find("\"results\"") != std::string_view::npos) return Result<SearchPage>::err(flat.error());
+    }
+    auto parsed = json::parse(body);
+    if (!parsed.ok) return Result<SearchPage>::err(Error::parse(parsed.error));
+    if (auto apiErr = extractApiError(body)) return Result<SearchPage>::err(Error::parse(*apiErr));
+    auto page = parseInnerTubePage(parsed.value);
+    return Result<SearchPage>::ok(std::move(page));
+}
+
+// --- Playback resolution (InnerTube player endpoint) ---
+
+namespace {
+
+// Numeric fields in player responses may be JSON numbers or numeric strings.
+long long getLongField(const json::JsonValue& obj, const std::string& key, long long fallback = 0) {
+    const json::JsonValue* v = obj.get(key);
+    if (!v) return fallback;
+    if (v->isNumber()) return static_cast<long long>(v->asNumber());
+    if (v->isString()) {
+        try { return std::stoll(v->asString()); } catch (...) { return fallback; }
+    }
+    return fallback;
+}
+
+int getIntField(const json::JsonValue& obj, const std::string& key, int fallback = 0) {
+    return static_cast<int>(getLongField(obj, key, fallback));
+}
+
+std::string getStrField(const json::JsonValue& obj, const std::string& key) {
+    auto s = json::getString(obj, key);
+    return s ? *s : std::string{};
+}
+
+std::string extractCodecs(const std::string& mimeType) {
+    // mimeType: audio/webm; codecs="opus" -> opus
+    size_t pos = mimeType.find("codecs=\"");
+    if (pos == std::string::npos) return "";
+    pos += 8;
+    size_t end = mimeType.find('"', pos);
+    if (end == std::string::npos) return "";
+    return mimeType.substr(pos, end - pos);
+}
+
+bool containsCiStr(const std::string& h, const char* n) {
+    if (h.empty()) return false;
+    std::string hl = h, nl = n;
+    std::transform(hl.begin(), hl.end(), hl.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    std::transform(nl.begin(), nl.end(), nl.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return hl.find(nl) != std::string::npos;
+}
+
+// Parse one streamingData format entry. Returns nullopt when unusable:
+// missing url (signatureCipher-only needs deciphering — out of scope),
+// non-audio mime, or empty mime.
+std::optional<models::AudioStream> tryParseAudioFormat(const json::JsonValue& fmt) {
+    if (!fmt.isObject()) return std::nullopt;
+    std::string url = getStrField(fmt, "url");
+    if (url.empty()) return std::nullopt; // signatureCipher-only: no decipher support
+    std::string mime = getStrField(fmt, "mimeType");
+    if (mime.rfind("audio/", 0) != 0) return std::nullopt;
+
+    models::AudioStream s;
+    s.itag = getIntField(fmt, "itag");
+    s.url = url;
+    s.mimeType = mime;
+    s.codecs = extractCodecs(mime);
+    s.bitrate = getLongField(fmt, "bitrate");
+    s.sampleRateHz = getIntField(fmt, "audioSampleRate");
+    s.channels = getIntField(fmt, "audioChannels", 2);
+    s.contentLengthBytes = getLongField(fmt, "contentLength");
+    s.approxDurationMs = getLongField(fmt, "approxDurationMs");
+    s.audioQuality = getStrField(fmt, "audioQuality");
+    s.isDefaultTrack = true;
+    if (auto* track = fmt.get("audioTrack")) {
+        if (auto* def = track->get("audioIsDefault")) {
+            if (def->isBool()) s.isDefaultTrack = def->asBool();
+        }
+    }
+    return s;
+}
+
+int codecRank(const std::string& codecs, const std::string& mime) {
+    std::string c = codecs;
+    std::transform(c.begin(), c.end(), c.begin(), [](unsigned char ch){ return static_cast<char>(std::tolower(ch)); });
+    if (c.find("opus") != std::string::npos) return 0;
+    if (c.find("mp4a") != std::string::npos) return 1;
+    if (c.find("vorbis") != std::string::npos) return 2;
+    std::string m = mime;
+    std::transform(m.begin(), m.end(), m.begin(), [](unsigned char ch){ return static_cast<char>(std::tolower(ch)); });
+    if (m.find("webm") != std::string::npos) return 0; // assume opus-in-webm
+    if (m.find("mp4") != std::string::npos) return 1;
+    return 3;
+}
+
+} // anonymous (playback helpers)
+
+std::optional<models::AudioStream> YouTubeClient::selectBestAudioStream(const std::vector<models::AudioStream>& streams) {
+    const models::AudioStream* best = nullptr;
+    for (auto& s : streams) {
+        if (!s.isUsable()) continue;
+        if (!best) { best = &s; continue; }
+        int rNew = codecRank(s.codecs, s.mimeType);
+        int rBest = codecRank(best->codecs, best->mimeType);
+        if (rNew != rBest) {
+            if (rNew < rBest) best = &s;
+        } else if (s.bitrate != best->bitrate) {
+            if (s.bitrate > best->bitrate) best = &s;
+        } else if (s.itag < best->itag) {
+            best = &s;
+        }
+    }
+    if (!best) return std::nullopt;
+    return *best;
+}
+
+Result<models::PlaybackResolution> YouTubeClient::parsePlayerResponse(std::string_view videoId, std::string_view body) {
+    models::PlaybackResolution res;
+    res.videoId = std::string(videoId);
+    if (body.empty()) return Result<models::PlaybackResolution>::err(Error::parse("Empty player response"));
+    auto parsed = json::parse(body);
+    if (!parsed.ok) return Result<models::PlaybackResolution>::err(Error::parse(parsed.error));
+    if (!parsed.value.isObject()) return Result<models::PlaybackResolution>::err(Error::parse("Invalid player response"));
+    if (auto apiErr = extractApiError(body)) return Result<models::PlaybackResolution>::err(Error::parse(*apiErr));
+
+    // playabilityStatus
+    std::string status;
+    std::string reason;
+    if (auto* ps = parsed.value.get("playabilityStatus")) {
+        status = getStrField(*ps, "status");
+        reason = getStrField(*ps, "reason");
+        if (reason.empty()) {
+            // LOGIN_REQUIRED often carries messages[] (plain strings or runs-objects)
+            if (auto* msgs = ps->get("messages")) {
+                if (msgs->isArray() && !msgs->asArray().empty()) {
+                    const json::JsonValue* m0 = msgs->at(0);
+                    if (m0->isString()) reason = m0->asString();
+                    else reason = json::extractRunsText(m0);
+                }
+            }
+        }
+        if (reason.empty()) {
+            if (auto sub = findFirstString(*ps, "subreason")) reason = *sub;
+        }
+    }
+    if (status.empty()) return Result<models::PlaybackResolution>::err(Error::parse("Missing playabilityStatus"));
+
+    if (status == "OK") {
+        res.playability = models::Playability::Playable;
+    } else if (status == "LOGIN_REQUIRED") {
+        res.playability = (containsCiStr(reason, "age") ? models::Playability::AgeRestricted
+                                                       : models::Playability::LoginRequired);
+        res.playabilityReason = reason.empty() ? "Sign in to play this video." : reason;
+    } else {
+        // ERROR / UNPLAYABLE / LIVE_STREAM_OFFLINE / anything else
+        bool ageGated = containsCiStr(reason, "age");
+        if (ageGated) {
+            res.playability = models::Playability::AgeRestricted;
+        } else {
+            res.playability = models::Playability::Unavailable;
+        }
+        res.playabilityReason = reason.empty() ? "This video is unavailable." : reason;
+    }
+    if (!res.isPlayable()) return Result<models::PlaybackResolution>::ok(std::move(res));
+
+    // streamingData: formats + adaptiveFormats, audio-only with direct url
+    if (auto* sd = parsed.value.get("streamingData")) {
+        for (const char* key : {"formats", "adaptiveFormats"}) {
+            if (auto* arr = sd->get(key)) {
+                if (!arr->isArray()) continue;
+                for (auto& f : arr->asArray()) {
+                    if (auto s = tryParseAudioFormat(f)) res.audioStreams.push_back(std::move(*s));
+                }
+            }
+        }
+    }
+    // Duration fallback chain: videoDetails.lengthSeconds -> selected approxDurationMs
+    if (auto* vd = parsed.value.get("videoDetails")) {
+        long long lenSec = getLongField(*vd, "lengthSeconds");
+        if (lenSec > 0) res.durationMs = lenSec * 1000;
+    }
+
+    res.selectedStream = selectBestAudioStream(res.audioStreams);
+    if (!res.selectedStream) {
+        return Result<models::PlaybackResolution>::err(Error::parse("No playable audio streams for this video."));
+    }
+    if (!res.durationMs && res.selectedStream->approxDurationMs > 0)
+        res.durationMs = res.selectedStream->approxDurationMs;
+    return Result<models::PlaybackResolution>::ok(std::move(res));
+}
+
+Result<models::PlaybackResolution> YouTubeClient::resolvePlayback(std::string_view videoId, std::optional<std::string_view> playlistId) {
+    if (videoId.empty()) return Result<models::PlaybackResolution>::err(Error::parse("Missing videoId"));
+    std::string body = buildPlayerBody(innertubeConfig_, videoId, playlistId);
+    auto res = innertubePost("player", body);
+    if (res.isErr()) return Result<models::PlaybackResolution>::err(res.error());
+    auto parsed = parsePlayerResponse(videoId, res.value());
+    if (parsed.isErr()) return parsed;
+    auto& r = parsed.value();
+    if (!r.isPlayable()) {
+        // Map playability to user-facing errors — reason text comes from YouTube, safe to display.
+        if (r.playability == models::Playability::LoginRequired)
+            return Result<models::PlaybackResolution>::err(Error{ErrorKind::Auth, r.playabilityReason.empty() ? "Sign in to play this video." : r.playabilityReason, 401});
+        if (r.playability == models::Playability::AgeRestricted)
+            return Result<models::PlaybackResolution>::err(Error{ErrorKind::Auth, r.playabilityReason.empty() ? "Age-restricted video. Sign in to confirm your age." : r.playabilityReason, 401});
+        return Result<models::PlaybackResolution>::err(Error{ErrorKind::NotFound, r.playabilityReason.empty() ? "This video is unavailable." : r.playabilityReason, 404});
+    }
+    return parsed;
+}
 
 } // namespace myytm::youtube

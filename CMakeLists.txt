@@ -29,6 +29,10 @@ add_executable(MyYtm
     src/ui/auth_screen.cpp
     src/player/queue.cpp
     src/player/mock_player.cpp
+    src/player/stream_player.cpp
+    src/player/audio_decoder.cpp
+    src/player/stream_pipeline.cpp
+    src/platform/miniaudio_impl.cpp
     src/ui/queue_screen.cpp
     src/ui/library_screen.cpp
     src/ui/playlists_screen.cpp
@@ -45,6 +49,7 @@ add_executable(MyYtm
 target_include_directories(MyYtm
     PRIVATE
         src
+        third_party/miniaudio
 )
 
 if(WIN32)
@@ -72,6 +77,10 @@ add_executable(MyYtmUiTests
     src/ui/auth_screen.cpp
     src/player/queue.cpp
     src/player/mock_player.cpp
+    src/player/stream_player.cpp
+    src/player/audio_decoder.cpp
+    src/player/stream_pipeline.cpp
+    src/platform/miniaudio_impl.cpp
     src/ui/queue_screen.cpp
     src/ui/library_screen.cpp
     src/ui/playlists_screen.cpp
@@ -85,7 +94,7 @@ add_executable(MyYtmUiTests
     src/platform/audio_backend.cpp
 )
 
-target_include_directories(MyYtmUiTests PRIVATE src)
+target_include_directories(MyYtmUiTests PRIVATE src third_party/miniaudio)
 
 if(WIN32)
     target_link_libraries(MyYtmUiTests PRIVATE crypt32 shell32 winhttp ws2_32 winmm bcrypt)
@@ -123,6 +132,27 @@ if(WIN32)
     target_link_libraries(MyYtmYoutubeTests PRIVATE crypt32 bcrypt winhttp ws2_32)
 endif()
 add_test(NAME YoutubeTests COMMAND MyYtmYoutubeTests)
+
+add_executable(MyYtmPlayerTests
+    tests/test_player_playback.cpp
+    src/player/queue.cpp
+    src/player/mock_player.cpp
+    src/player/stream_player.cpp
+    src/player/audio_decoder.cpp
+    src/player/stream_pipeline.cpp
+    src/youtube/http_client.cpp
+    src/youtube/youtube_client.cpp
+    src/youtube/innertube.cpp
+    src/youtube/json.cpp
+    src/platform/miniaudio_impl.cpp
+    src/platform/http/WinHttpClient.cpp
+    src/platform/crypto/CryptoWin.cpp
+)
+target_include_directories(MyYtmPlayerTests PRIVATE src third_party/miniaudio)
+if(WIN32)
+    target_link_libraries(MyYtmPlayerTests PRIVATE crypt32 bcrypt winhttp ws2_32)
+endif()
+add_test(NAME PlayerTests COMMAND MyYtmPlayerTests)
 
 # Windows packaging (Phase 8) — ZIP + NSIS + MSI (WIX) with choosable install dir
 include(InstallRequiredSystemLibraries)

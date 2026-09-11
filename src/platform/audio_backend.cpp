@@ -1,106 +1,106 @@
 #include "platform/audio_backend.h"
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
-
-#ifdef _WIN32
-#include <mmsystem.h>
-#pragma comment(lib, "winmm.lib")
-#endif
 
 namespace myytm::platform {
 
 WinAudioBackend::~WinAudioBackend() { stop(); }
 
-bool WinAudioBackend::startTone(int freqHz, int durationMs) {
+void WinAudioBackend::deviceCallback(ma_device* device, void* output, const void*, ma_uint32 frameCount) {
+    auto* self = static_cast<WinAudioBackend*>(device->pUserData);
+    int16_t* out = static_cast<int16_t*>(output);
+    uint32_t ch = device->playback.channels;
+    std::lock_guard<std::mutex> lock(self->mutex_);
+    for (ma_uint32 f = 0; f < frameCount; ++f) {
+        for (uint32_t c = 0; c < ch; ++c) {
+            if (self->fifo_.empty()) {
+                if (self->loop_ && !self->loopBuf_.empty()) {
+                    self->fifo_.insert(self->fifo_.end(), self->loopBuf_.begin(), self->loopBuf_.end());
+                } else {
+                    *out++ = 0;
+                    continue;
+                }
+            }
+            *out++ = self->fifo_.front();
+            self->fifo_.pop_front();
+        }
+    }
+}
+
+void WinAudioBackend::stopDeviceLocked() {
+    if (deviceInit_) {
+        ma_device_stop(&device_);
+        ma_device_uninit(&device_);
+        deviceInit_ = false;
+    }
+    fifo_.clear();
+    loopBuf_.clear();
+    loop_ = false;
+}
+
+bool WinAudioBackend::playPcm(const int16_t* samples, size_t sampleCount, uint32_t sampleRateHz,
+                               uint16_t channels, bool loop) {
+    if (!samples || sampleCount == 0 || sampleRateHz == 0 || channels == 0) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
 #ifdef _WIN32
-    stop();
-    stopRequested_ = false;
+    stopDeviceLocked();
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format = ma_format_s16;
+    config.playback.channels = channels;
+    config.sampleRate = sampleRateHz;
+    config.dataCallback = &WinAudioBackend::deviceCallback;
+    config.pUserData = this;
+    if (ma_device_init(nullptr, &config, &device_) != MA_SUCCESS) return false;
+    deviceInit_ = true;
+    ma_device_set_master_volume(&device_, std::clamp(volume_, 0, 100) / 100.0f);
+    fifo_.insert(fifo_.end(), samples, samples + sampleCount);
+    if (loop) loopBuf_.assign(samples, samples + sampleCount);
+    loop_ = loop;
+    if (ma_device_start(&device_) != MA_SUCCESS) {
+        stopDeviceLocked();
+        return false;
+    }
     playing_ = true;
-    volume_ = std::clamp(volume_, 0, 100);
-    // Start thread that streams via waveOut
-    thread_ = std::thread([this, freqHz, durationMs]{ toneThread(freqHz); (void)durationMs; });
     return true;
 #else
-    (void)freqHz; (void)durationMs;
+    (void)samples; (void)sampleCount; (void)sampleRateHz; (void)channels; (void)loop;
     playing_ = true;
     return true;
 #endif
 }
 
+bool WinAudioBackend::startTone(int freqHz, int durationMs) {
+    // Self-test signal through the real PCM path (legacy placeholder source).
+    constexpr uint32_t kRate = 44100;
+    int ms = durationMs < 0 ? 1000 : durationMs;
+    size_t frames = static_cast<size_t>(kRate) * static_cast<size_t>(ms) / 1000;
+    if (frames == 0) frames = 1;
+    std::vector<int16_t> pcm(frames);
+    const double inc = 2.0 * 3.141592653589793 * freqHz / kRate;
+    double phase = 0.0;
+    int vol = std::clamp(volume_, 0, 100);
+    for (size_t i = 0; i < frames; ++i) {
+        pcm[i] = static_cast<int16_t>(std::sin(phase) * (vol / 100.0) * 16000.0);
+        phase += inc;
+        if (phase > 2 * 3.141592653589793) phase -= 2 * 3.141592653589793;
+    }
+    return playPcm(pcm.data(), pcm.size(), kRate, 1, durationMs < 0);
+}
+
 void WinAudioBackend::stop() {
-    stopRequested_ = true;
-    if (thread_.joinable()) thread_.join();
-    playing_ = false;
+    std::lock_guard<std::mutex> lock(mutex_);
 #ifdef _WIN32
-    if (hWaveOut_) { waveOutClose(hWaveOut_); hWaveOut_ = nullptr; }
+    stopDeviceLocked();
 #endif
+    playing_ = false;
 }
 
 void WinAudioBackend::setVolume(int v) {
     volume_ = std::clamp(v, 0, 100);
+    std::lock_guard<std::mutex> lock(mutex_);
 #ifdef _WIN32
-    if (hWaveOut_) {
-        DWORD vol = (DWORD)((volume_ * 0xFFFF / 100) & 0xFFFF);
-        DWORD both = (vol | (vol << 16));
-        waveOutSetVolume(hWaveOut_, both);
-    }
-#endif
-}
-
-void WinAudioBackend::toneThread(int freqHz) {
-#ifdef _WIN32
-    WAVEFORMATEX fmt{};
-    fmt.wFormatTag = WAVE_FORMAT_PCM;
-    fmt.nChannels = 1;
-    fmt.nSamplesPerSec = 44100;
-    fmt.wBitsPerSample = 16;
-    fmt.nBlockAlign = fmt.nChannels * fmt.wBitsPerSample / 8;
-    fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
-    fmt.cbSize = 0;
-
-    if (waveOutOpen(&hWaveOut_, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        playing_ = false;
-        return;
-    }
-    setVolume(volume_);
-
-    const int samplesPerBlock = 4410; // 100ms
-    const double twoPiF = 2.0 * 3.141592653589793 * freqHz;
-    double phase = 0.0;
-    double phaseInc = twoPiF / fmt.nSamplesPerSec;
-
-    // Double-buffered streaming
-    struct Block { WAVEHDR hdr{}; std::vector<short> data; };
-    Block blocks[2];
-    for (auto& b : blocks) b.data.resize(samplesPerBlock);
-
-    int idx = 0;
-    while (!stopRequested_) {
-        Block& b = blocks[idx];
-        // Generate sine
-        for (int i=0;i<samplesPerBlock;++i) {
-            double v = std::sin(phase) * (volume_/100.0) * 16000.0;
-            b.data[i] = static_cast<short>(v);
-            phase += phaseInc;
-            if (phase > 2*3.141592653589793) phase -= 2*3.141592653589793;
-        }
-        b.hdr.lpData = reinterpret_cast<LPSTR>(b.data.data());
-        b.hdr.dwBufferLength = (DWORD)(b.data.size()*sizeof(short));
-        b.hdr.dwFlags = 0;
-        waveOutPrepareHeader(hWaveOut_, &b.hdr, sizeof(b.hdr));
-        waveOutWrite(hWaveOut_, &b.hdr, sizeof(b.hdr));
-        // Simple sleep for block duration (100ms) while checking stop
-        for (int s=0;s<10 && !stopRequested_; ++s) Sleep(10);
-        // Wait for buffer done (poll)
-        while (!(b.hdr.dwFlags & WHDR_DONE) && !stopRequested_) Sleep(5);
-        waveOutUnprepareHeader(hWaveOut_, &b.hdr, sizeof(b.hdr));
-        idx ^= 1;
-    }
-    waveOutReset(hWaveOut_);
-#else
-    // Non-Windows: just sleep as placeholder
-    while (!stopRequested_) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (deviceInit_) ma_device_set_master_volume(&device_, volume_ / 100.0f);
 #endif
 }
 
