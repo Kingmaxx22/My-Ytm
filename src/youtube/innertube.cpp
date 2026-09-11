@@ -64,17 +64,61 @@ std::string buildInnertubeContextJson(const InnertubeConfig& cfg) {
     oss << "\"clientVersion\":\"" << jsonEscape(cfg.clientVersion) << "\",";
     oss << "\"hl\":\"" << jsonEscape(cfg.hl) << "\",";
     oss << "\"gl\":\"" << jsonEscape(cfg.gl) << "\"";
+    if (!cfg.visitorData.empty()) oss << ",\"visitorData\":\"" << jsonEscape(cfg.visitorData) << "\"";
     oss << "},\"user\":{\"lockedSafetyMode\":false}}";
     return oss.str();
 }
 
-std::string buildSearchBody(const InnertubeConfig& cfg, std::string_view query, std::optional<std::string_view> continuation) {
+std::optional<std::string> extractVisitorData(std::string_view body) {
+    // Lightweight scan for "visitorData":"..."
+    size_t pos = body.find("\"visitorData\"");
+    if (pos == std::string_view::npos) return std::nullopt;
+    size_t colon = body.find(':', pos);
+    if (colon == std::string_view::npos) return std::nullopt;
+    size_t q1 = body.find('"', colon);
+    if (q1 == std::string_view::npos) return std::nullopt;
+    size_t q2 = body.find('"', q1+1);
+    if (q2 == std::string_view::npos) return std::nullopt;
+    std::string v(body.substr(q1+1, q2-q1-1));
+    if (v.empty()) return std::nullopt;
+    return v;
+}
+
+std::optional<std::string> searchFilterParams(SearchFilter filter) {
+    switch (filter) {
+        case SearchFilter::All: return std::nullopt;
+        case SearchFilter::Songs: return std::string("EgWKAQIIAWoKEAoQAxAEEAkQBQ==");
+        case SearchFilter::Videos: return std::string("EgWKAQIQAWoKEAoQAxAEEAkQBQ==");
+        case SearchFilter::Albums: return std::string("EgWKAQIYAWoKEAoQAxAEEAkQBQ==");
+        case SearchFilter::Artists: return std::string("EgWKAQEgAWoKEAoQAxAEEAkQBQ==");
+        case SearchFilter::Playlists: return std::string("EgWKAQIoAWoKEAoQAxAEEAkQBQ==");
+    }
+    return std::nullopt;
+}
+std::string searchFilterLabel(SearchFilter filter) {
+    switch (filter) {
+        case SearchFilter::All: return "All";
+        case SearchFilter::Songs: return "Songs";
+        case SearchFilter::Videos: return "Videos";
+        case SearchFilter::Albums: return "Albums";
+        case SearchFilter::Artists: return "Artists";
+        case SearchFilter::Playlists: return "Playlists";
+    }
+    return "All";
+}
+
+std::string buildSearchBody(const InnertubeConfig& cfg, std::string_view query, std::optional<std::string_view> continuation, std::optional<SearchFilter> filter) {
     std::ostringstream oss;
     oss << "{" << buildInnertubeContextJson(cfg) << ",";
     if (continuation && !continuation->empty()) {
         oss << "\"continuation\":\"" << jsonEscape(*continuation) << "\"";
     } else {
         oss << "\"query\":\"" << jsonEscape(query) << "\"";
+        if (filter && filter.value() != SearchFilter::All) {
+            if (auto params = searchFilterParams(*filter)) {
+                oss << ",\"params\":\"" << jsonEscape(*params) << "\"";
+            }
+        }
     }
     oss << "}";
     return oss.str();

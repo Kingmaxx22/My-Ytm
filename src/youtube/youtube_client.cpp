@@ -395,7 +395,7 @@ Result<models::SearchResults> YouTubeClient::parseSearchResponse(std::string_vie
     return Result<models::SearchResults>::ok(std::move(out));
 }
 
-Result<models::SearchResults> YouTubeClient::fallbackLocalSearch(std::string_view query)
+Result<models::SearchResults> YouTubeClient::fallbackLocalSearch(std::string_view query, SearchFilter filter)
 {
     // Same catalog as SearchScreen fallback — keeps Phase 3 behavior when offline.
     models::SearchResults catalog = {
@@ -408,9 +408,22 @@ Result<models::SearchResults> YouTubeClient::fallbackLocalSearch(std::string_vie
         models::SearchResult::fromAlbum({"al1", "After Hours", "The Weeknd", 2020}),
         models::SearchResult::fromPlaylist({"p1", "Liked Songs", "You", 128}),
     };
-    if (query.empty()) return Result<models::SearchResults>::ok(std::move(catalog));
+    auto typeMatches = [&](const models::SearchResult& r){
+        if (filter == SearchFilter::All) return true;
+        if (filter == SearchFilter::Songs) return r.type == models::SearchResultType::Song;
+        if (filter == SearchFilter::Videos) return r.type == models::SearchResultType::Song; // Videos map to Song type in mock
+        if (filter == SearchFilter::Albums) return r.type == models::SearchResultType::Album;
+        if (filter == SearchFilter::Artists) return r.type == models::SearchResultType::Artist;
+        if (filter == SearchFilter::Playlists) return r.type == models::SearchResultType::Playlist;
+        return true;
+    };
+    if (query.empty()) {
+        models::SearchResults out;
+        for (auto& r : catalog) if (typeMatches(r)) out.push_back(r);
+        return Result<models::SearchResults>::ok(std::move(out));
+    }
     models::SearchResults out;
-    for (auto& r : catalog) if (containsCi(r.title, query) || containsCi(r.subtitle, query) || containsCi(r.typeLabel(), query)) out.push_back(r);
+    for (auto& r : catalog) if (typeMatches(r) && (containsCi(r.title, query) || containsCi(r.subtitle, query) || containsCi(r.typeLabel(), query))) out.push_back(r);
     return Result<models::SearchResults>::ok(std::move(out));
 }
 
@@ -420,12 +433,27 @@ Result<std::string> YouTubeClient::innertubePost(std::string_view endpoint, cons
     HttpRequest req;
     req.url = url;
     req.method = "POST";
-    req.headers = {{"Content-Type", "application/json"}, {"Accept", "application/json"}};
+    req.headers = {{"Content-Type", "application/json"}, {"Accept", "application/json"}, {"Origin", "https://music.youtube.com"}, {"Referer", "https://music.youtube.com/"}};
+    // X-Goog-Api-Key header for compatibility — keep URL key as well, never log
+    if (auto key = effectiveApiKey(innertubeConfig_); !key.empty()) req.headers["X-Goog-Api-Key"] = key;
+    if (!innertubeConfig_.visitorData.empty()) req.headers["X-Goog-Visitor-Id"] = innertubeConfig_.visitorData;
     req.body = jsonBody;
     req.timeout = std::chrono::milliseconds{8000};
     attachAuth(req);
     HttpResponse resp = http_->execute(req);
-    return handleInnertubeResponse(resp);
+    auto result = handleInnertubeResponse(resp);
+    // Capture visitorData if present for next requests — never log value
+    if (result.isOk()) {
+        if (auto vd = extractVisitorData(result.value())) {
+            innertubeConfig_.visitorData = *vd;
+        } else if (auto vd2 = extractVisitorData(resp.body)) {
+            innertubeConfig_.visitorData = *vd2;
+        }
+    } else {
+        // Even on error, try to capture visitorData from body for future requests
+        if (auto vd = extractVisitorData(resp.body)) innertubeConfig_.visitorData = *vd;
+    }
+    return result;
 }
 
 Result<std::string> YouTubeClient::handleInnertubeResponse(const HttpResponse& resp) {
@@ -467,14 +495,14 @@ std::optional<std::string> YouTubeClient::extractApiError(std::string_view body)
     return msg;
 }
 
-Result<YouTubeClient::SearchPage> YouTubeClient::searchPage(std::string_view query, std::optional<std::string_view> continuation) {
-    std::string body = buildSearchBody(innertubeConfig_, query, continuation);
+Result<YouTubeClient::SearchPage> YouTubeClient::searchPage(std::string_view query, std::optional<std::string_view> continuation, SearchFilter filter) {
+    std::string body = buildSearchBody(innertubeConfig_, query, continuation, filter == SearchFilter::All ? std::nullopt : std::optional<SearchFilter>(filter));
     auto res = innertubePost("search", body);
     if (res.isErr()) {
         if (res.error().kind == ErrorKind::Network && res.error().message.find("Unable to connect") != std::string::npos && useMockSearch_) {
             // Offline fallback: try mock local search for first page only
             if (!continuation || continuation->empty()) {
-                auto fb = fallbackLocalSearch(query);
+                auto fb = fallbackLocalSearch(query, filter);
                 if (fb.isOk()) return Result<SearchPage>::ok(SearchPage{fb.value(), std::nullopt});
             }
         }
@@ -568,24 +596,34 @@ void YouTubeClient::attachAuth(HttpRequest& req) const {
     }
 }
 
-Result<models::SearchResults> YouTubeClient::search(std::string_view query)
+Result<models::SearchResults> YouTubeClient::search(std::string_view query, SearchFilter filter)
 {
-    auto page = searchPage(query, std::nullopt);
+    auto page = searchPage(query, std::nullopt, filter);
     if (page.isErr()) {
         // Fallback for offline/mock when Innertube unreachable
         if (page.error().kind == ErrorKind::Network && useMockSearch_) {
-            return fallbackLocalSearch(query);
+            return fallbackLocalSearch(query, filter);
         }
         return Result<models::SearchResults>::err(page.error());
     }
     auto results = page.value().results;
     // Mock fallback filtering already handled in parse; for flat mock demo, filter here
-    if (!query.empty() && useMockSearch_) {
+    if (useMockSearch_) {
         // Only filter if results look like mock flat (no continuation and small catalog)
         // Real InnerTube already filters server-side, so skip when continuation present or results large
-        if (!page.value().continuationToken.has_value() && results.size() <= 8) {
+        bool needsFilter = !page.value().continuationToken.has_value() && results.size() <= 8;
+        if (needsFilter) {
             models::SearchResults filtered;
-            for (auto& r : results) if (containsCi(r.title, query) || containsCi(r.subtitle, query) || containsCi(r.typeLabel(), query)) filtered.push_back(r);
+            for (auto& r : results) {
+                bool matchesQuery = query.empty() || containsCi(r.title, query) || containsCi(r.subtitle, query) || containsCi(r.typeLabel(), query);
+                bool matchesFilter = filter == SearchFilter::All ||
+                    (filter == SearchFilter::Songs && r.type == models::SearchResultType::Song) ||
+                    (filter == SearchFilter::Videos && r.type == models::SearchResultType::Song) ||
+                    (filter == SearchFilter::Albums && r.type == models::SearchResultType::Album) ||
+                    (filter == SearchFilter::Artists && r.type == models::SearchResultType::Artist) ||
+                    (filter == SearchFilter::Playlists && r.type == models::SearchResultType::Playlist);
+                if (matchesQuery && matchesFilter) filtered.push_back(r);
+            }
             return Result<models::SearchResults>::ok(std::move(filtered));
         }
     }

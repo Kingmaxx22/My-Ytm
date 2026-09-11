@@ -2,6 +2,7 @@
 
 #include "models/search_result.h"
 #include "ui/screen.h"
+#include "youtube/innertube.h"
 
 #include <memory>
 #include <string>
@@ -39,6 +40,9 @@ public:
     void setClient(std::shared_ptr<youtube::YouTubeClient> c) { client_ = std::move(c); }
     void setQueue(std::shared_ptr<player::Queue> q) { queue_ = std::move(q); }
     void setPlayer(std::shared_ptr<player::Player> p) { player_ = std::move(p); }
+    void setFilter(youtube::SearchFilter f) { filter_ = f; }
+    [[nodiscard]] youtube::SearchFilter filter() const noexcept { return filter_; }
+    void toggleSongsFilter();
 
 private:
     enum class Mode { Browsing, Input };
@@ -62,6 +66,7 @@ private:
     bool pendingG_ = false;
     std::string statusMsg_;
     std::optional<std::string> continuationToken_;
+    youtube::SearchFilter filter_ = youtube::SearchFilter::All;
     std::shared_ptr<youtube::YouTubeClient> client_;
     std::shared_ptr<player::Queue> queue_;
     std::shared_ptr<player::Player> player_;

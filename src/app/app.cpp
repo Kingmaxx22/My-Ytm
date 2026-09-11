@@ -88,6 +88,9 @@ int App::run()
         icfg.clientName = cfgMgr.get().youtubeClientName;
         icfg.clientVersion = cfgMgr.get().youtubeClientVersion;
         icfg.baseUrl = cfgMgr.get().youtubeBaseUrl;
+        icfg.visitorData = cfgMgr.get().youtubeVisitorData;
+        // Verify WEB_REMIX defaults (task requirement)
+        if (icfg.clientName != "WEB_REMIX") logger.warn("Unexpected Innertube clientName: " + icfg.clientName);
         ytClient->setInnertubeConfig(icfg);
     }
 

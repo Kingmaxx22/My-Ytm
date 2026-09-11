@@ -157,6 +157,7 @@ bool ConfigManager::load()
         cfg_.youtubeClientName = parseStringField(json, "youtubeClientName", cfg_.youtubeClientName);
         cfg_.youtubeClientVersion = parseStringField(json, "youtubeClientVersion", cfg_.youtubeClientVersion);
         cfg_.youtubeBaseUrl = parseStringField(json, "youtubeBaseUrl", cfg_.youtubeBaseUrl);
+        cfg_.youtubeVisitorData = parseStringField(json, "youtubeVisitorData", cfg_.youtubeVisitorData);
         if (cfg_.youtubeClientName.empty()) cfg_.youtubeClientName = "WEB_REMIX";
         if (cfg_.youtubeClientVersion.empty()) cfg_.youtubeClientVersion = "1.20240702.01.00";
         if (cfg_.youtubeBaseUrl.empty()) cfg_.youtubeBaseUrl = "https://music.youtube.com";
@@ -186,7 +187,8 @@ bool ConfigManager::save() const
         out << "  \"lastScreen\": \"" << escapeJson(cfg_.lastScreen) << "\",\n";
         out << "  \"youtubeClientName\": \"" << escapeJson(cfg_.youtubeClientName) << "\",\n";
         out << "  \"youtubeClientVersion\": \"" << escapeJson(cfg_.youtubeClientVersion) << "\",\n";
-        out << "  \"youtubeBaseUrl\": \"" << escapeJson(cfg_.youtubeBaseUrl) << "\"\n";
+        out << "  \"youtubeBaseUrl\": \"" << escapeJson(cfg_.youtubeBaseUrl) << "\",\n";
+        out << "  \"youtubeVisitorData\": \"" << escapeJson(cfg_.youtubeVisitorData) << "\"\n";
         // youtubeApiKey intentionally not persisted by default to avoid accidental commit; keep empty unless user sets
         out << "}\n";
         return out.good();

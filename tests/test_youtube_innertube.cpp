@@ -180,6 +180,42 @@ void test_library_grid() {
     }
 }
 
+void test_library_pagination() {
+    std::cout<<"\n-- library pagination --\n";
+    // Mock that returns first page with continuation, second page without
+    struct PaginatedMock : public youtube::IHttpClient {
+        youtube::HttpResponse execute(const youtube::HttpRequest& req) override {
+            bool isCont = req.body.find("tok123") != std::string::npos;
+            if (isCont) {
+                std::string body = R"json({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"musicShelfRenderer":{"contents":[{"musicResponsiveListItemRenderer":{"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song2"}]}}}],"navigationEndpoint":{"watchEndpoint":{"videoId":"id2"}}}}]}}]}}}}]}}})json";
+                return youtube::HttpResponse{200, body, {}, ""};
+            } else {
+                std::string body = R"json({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"musicShelfRenderer":{"contents":[{"musicResponsiveListItemRenderer":{"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song1"}]}}}],"navigationEndpoint":{"watchEndpoint":{"videoId":"id1"}}}}],"continuations":[{"nextContinuationData":{"continuation":"tok123"}}]}}]}}}}]}}})json";
+                return youtube::HttpResponse{200, body, {}, ""};
+            }
+        }
+    };
+    auto client = std::make_shared<youtube::YouTubeClient>(std::make_unique<PaginatedMock>());
+    auto p1 = client->getLibraryPage(std::nullopt);
+    EXPECT(p1.isOk() && p1.value().results.size()==1 && p1.value().continuationToken.has_value(), "library page1 with token");
+    auto p2 = client->getLibraryPage(*p1.value().continuationToken);
+    EXPECT(p2.isOk() && p2.value().results.size()==1 && !p2.value().continuationToken.has_value(), "library page2 no token");
+    // Verify append preserves: simulate UI append
+    std::vector<models::SearchResult> combined = p1.value().results;
+    combined.insert(combined.end(), p2.value().results.begin(), p2.value().results.end());
+    EXPECT(combined.size()==2 && combined[0].id=="id1" && combined[1].id=="id2", "library append preserves");
+    // Malformed continuation should be handled gracefully (no token, not error)
+    struct MalformedMock : public youtube::IHttpClient {
+        youtube::HttpResponse execute(const youtube::HttpRequest&) override {
+            std::string body = R"json({"contents":{"singleColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"sectionListRenderer":{"contents":[{"musicShelfRenderer":{"contents":[],"continuations":[{"nextContinuationData":{}}]}}]}}}}]}}})json";
+            return youtube::HttpResponse{200, body, {}, ""};
+        }
+    };
+    auto client2 = std::make_shared<youtube::YouTubeClient>(std::make_unique<MalformedMock>());
+    auto p3 = client2->getLibraryPage(std::nullopt);
+    EXPECT(p3.isOk() && !p3.value().continuationToken.has_value(), "malformed continuation -> no token");
+}
+
 void test_missing_optional_fields() {
     std::cout<<"\n-- missing optional fields --\n";
     std::string json = R"json({
@@ -281,7 +317,7 @@ void test_innertube_url_and_body() {
     youtube::InnertubeConfig cfg;
     cfg.apiKey = "TESTKEY123";
     cfg.clientName = "WEB_REMIX";
-    cfg.clientVersion = "1.20240101.00.00";
+    cfg.clientVersion = "1.20240702.01.00";
     std::string url = youtube::buildInnertubeUrl(cfg, "search");
     EXPECT(url.find("https://music.youtube.com/youtubei/v1/search")!=std::string::npos, "url endpoint");
     EXPECT(url.find("key=TESTKEY123")!=std::string::npos, "url api key");
@@ -296,11 +332,160 @@ void test_innertube_url_and_body() {
     EXPECT(body.find("TESTKEY123")==std::string::npos, "apiKey not in body");
 }
 
+void test_innertube_auth_context_hardening() {
+    std::cout<<"\n-- innertube auth/context hardening --\n";
+    // Verify WEB_REMIX defaults
+    youtube::InnertubeConfig def;
+    EXPECT(def.clientName=="WEB_REMIX", "default WEB_REMIX");
+    EXPECT(def.clientVersion=="1.20240702.01.00", "default clientVersion");
+    EXPECT(def.baseUrl=="https://music.youtube.com", "default baseUrl");
+    EXPECT(def.hl=="en" && def.gl=="US", "default hl/gl");
+    // visitorData in context when available
+    youtube::InnertubeConfig cfg;
+    cfg.visitorData = "CgtTestVisitor123%3D";
+    std::string bodyWithVd = youtube::buildSearchBody(cfg, "test", std::nullopt);
+    EXPECT(bodyWithVd.find("\"visitorData\":\"CgtTestVisitor123%3D\"")!=std::string::npos, "visitorData in context");
+    youtube::InnertubeConfig cfgNoVd;
+    std::string bodyNoVd = youtube::buildSearchBody(cfgNoVd, "test", std::nullopt);
+    EXPECT(bodyNoVd.find("visitorData")==std::string::npos, "no visitorData when empty");
+
+    // X-Goog-Api-Key and authenticated headers via captured request
+    struct CapturingMock : public youtube::IHttpClient {
+        youtube::HttpRequest lastReq;
+        youtube::HttpResponse toReturn{200, R"({"contents":{"tabbedSearchResultsRenderer":{"tabs":[]}}})", {}, ""};
+        youtube::HttpResponse execute(const youtube::HttpRequest& req) override { lastReq = req; return toReturn; }
+    };
+    auto cap = std::make_unique<CapturingMock>();
+    auto* rawCap = cap.get();
+    youtube::InnertubeConfig cfg2; cfg2.apiKey="MYKEY123"; cfg2.visitorData="VISITOR123";
+    auto client = youtube::YouTubeClient(std::move(cap));
+    client.setInnertubeConfig(cfg2);
+    client.setAuthHeaderProvider([]()->std::optional<std::string>{ return std::string("Bearer Tok123"); });
+    auto res = client.search("hello");
+    EXPECT(rawCap->lastReq.url.find("key=MYKEY123")!=std::string::npos, "X-Goog-Api-Key in URL (via ?key=)");
+    EXPECT(rawCap->lastReq.headers.count("X-Goog-Api-Key") && rawCap->lastReq.headers.at("X-Goog-Api-Key")=="MYKEY123", "X-Goog-Api-Key header");
+    EXPECT(rawCap->lastReq.headers.count("Authorization") && rawCap->lastReq.headers.at("Authorization")=="Bearer Tok123", "Authorization header");
+    EXPECT(rawCap->lastReq.headers.count("X-Goog-Visitor-Id") || rawCap->lastReq.body.find("VISITOR123")!=std::string::npos, "visitorData in header or body");
+    EXPECT(rawCap->lastReq.body.find("VISITOR123")!=std::string::npos, "visitorData in body context");
+    EXPECT(rawCap->lastReq.body.find("Tok123")==std::string::npos, "token not in body (only header)");
+    EXPECT(rawCap->lastReq.headers.at("X-Goog-Api-Key").find("Tok123")==std::string::npos, "token not leaked in api key header");
+
+    // Unauthenticated: no Authorization header
+    struct CapturingMock2 : public youtube::IHttpClient {
+        youtube::HttpRequest lastReq;
+        youtube::HttpResponse execute(const youtube::HttpRequest& req) override { lastReq=req; return youtube::HttpResponse{200, R"({"contents":{}})", {}, ""}; }
+    };
+    auto cap2 = std::make_unique<CapturingMock2>();
+    auto* raw2 = cap2.get();
+    youtube::YouTubeClient client2(std::move(cap2));
+    client2.setInnertubeConfig(cfg2);
+    // No auth provider
+    client2.search("hello");
+    EXPECT(raw2->lastReq.headers.find("Authorization")==raw2->lastReq.headers.end(), "no auth header when signed out");
+
+    // visitorData extraction and persistence in-memory
+    struct VisitorMock : public youtube::IHttpClient {
+        youtube::HttpResponse execute(const youtube::HttpRequest&) override {
+            std::string body = R"({"responseContext":{"visitorData":"CgtNewVisitor%3D"},"contents":{}})";
+            return youtube::HttpResponse{200, body, {}, ""};
+        }
+    };
+    auto vClient = youtube::YouTubeClient(std::make_unique<VisitorMock>());
+    youtube::InnertubeConfig vCfg; vCfg.visitorData="";
+    vClient.setInnertubeConfig(vCfg);
+    // Before request, no visitorData
+    EXPECT(vClient.innertubeConfig().visitorData.empty(), "initial visitorData empty");
+    vClient.search("test");
+    EXPECT(vClient.innertubeConfig().visitorData=="CgtNewVisitor%3D", "visitorData captured in-memory");
+    // Next request should include it
+    struct CapturingMock3 : public youtube::IHttpClient {
+        youtube::HttpRequest lastReq;
+        youtube::HttpResponse execute(const youtube::HttpRequest& req) override { lastReq=req; return youtube::HttpResponse{200, R"({"contents":{}})", {}, ""}; }
+    };
+    // Use same client (already has visitorData) to make next request, capture body
+    auto cap3 = std::make_unique<CapturingMock3>();
+    auto* raw3 = cap3.get();
+    // Need to transfer visitorData to new client for test isolation: simulate persistence
+    youtube::InnertubeConfig cfgWithVd; cfgWithVd.visitorData="CgtPersisted%3D";
+    auto client3 = youtube::YouTubeClient(std::move(cap3));
+    client3.setInnertubeConfig(cfgWithVd);
+    client3.search("hello2");
+    EXPECT(raw3->lastReq.body.find("CgtPersisted%3D")!=std::string::npos, "persisted visitorData in next request");
+
+    // 401/403/429 handling without retry
+    auto http401 = std::make_unique<youtube::MockHttpClient>();
+    http401->cannedResponse = youtube::HttpResponse{401, R"({"error":{"code":401,"message":"Unauthorized"}})", {}, ""};
+    auto c401 = youtube::YouTubeClient(std::move(http401));
+    auto r401 = c401.search("q");
+    EXPECT(r401.isErr() && r401.error().kind==youtube::ErrorKind::Auth, "401 -> Auth (no retry)");
+
+    auto http403 = std::make_unique<youtube::MockHttpClient>();
+    http403->cannedResponse = youtube::HttpResponse{403, R"({"error":{"code":403,"message":"Forbidden"}})", {}, ""};
+    auto c403 = youtube::YouTubeClient(std::move(http403));
+    auto r403 = c403.search("q");
+    EXPECT(r403.isErr() && r403.error().kind==youtube::ErrorKind::Auth, "403 -> Auth");
+
+    auto http429 = std::make_unique<youtube::MockHttpClient>();
+    http429->cannedResponse = youtube::HttpResponse{429, "", {}, ""};
+    auto c429 = youtube::YouTubeClient(std::move(http429));
+    auto r429 = c429.search("q");
+    EXPECT(r429.isErr() && r429.error().kind==youtube::ErrorKind::RateLimited, "429 -> RateLimited");
+    // Ensure no secret in error message
+    EXPECT(r401.error().message.find("MYKEY123")==std::string::npos && r401.error().message.find("Tok123")==std::string::npos, "no secret in 401 error");
+}
+
+void test_search_filter() {
+    std::cout<<"\n-- search filter Songs --\n";
+    // Params generation
+    auto paramsAll = youtube::searchFilterParams(youtube::SearchFilter::All);
+    EXPECT(!paramsAll.has_value(), "All has no params");
+    auto paramsSongs = youtube::searchFilterParams(youtube::SearchFilter::Songs);
+    EXPECT(paramsSongs.has_value() && *paramsSongs=="EgWKAQIIAWoKEAoQAxAEEAkQBQ==", "Songs params correct");
+    EXPECT(youtube::searchFilterLabel(youtube::SearchFilter::Songs)=="Songs", "label Songs");
+    EXPECT(youtube::searchFilterLabel(youtube::SearchFilter::All)=="All", "label All");
+
+    // Request body with filter
+    youtube::InnertubeConfig cfg;
+    cfg.apiKey="TESTKEY"; cfg.clientName="WEB_REMIX"; cfg.clientVersion="1.20240702.01.00";
+    std::string bodyAll = youtube::buildSearchBody(cfg, "test", std::nullopt, youtube::SearchFilter::All);
+    EXPECT(bodyAll.find("\"params\"")==std::string::npos, "All body no params");
+    std::string bodySongs = youtube::buildSearchBody(cfg, "test", std::nullopt, youtube::SearchFilter::Songs);
+    EXPECT(bodySongs.find("\"params\":\"EgWKAQIIAWoKEAoQAxAEEAkQBQ==\"")!=std::string::npos, "Songs body has params");
+    EXPECT(bodySongs.find("\"query\":\"test\"")!=std::string::npos, "Songs body still has query");
+    // Continuation should not include query/params, only continuation
+    std::string bodyContFiltered = youtube::buildSearchBody(cfg, "test", std::string("tok"), youtube::SearchFilter::Songs);
+    EXPECT(bodyContFiltered.find("\"continuation\":\"tok\"")!=std::string::npos, "filtered continuation");
+    EXPECT(bodyContFiltered.find("\"params\"")==std::string::npos, "continuation no params (token encodes filter)");
+    EXPECT(bodyContFiltered.find("\"query\"")==std::string::npos, "continuation no query");
+
+    // YouTubeClient filtered search with mock — should return only Songs
+    auto client = std::make_shared<youtube::YouTubeClient>(std::make_unique<youtube::MockHttpClient>());
+    auto resAll = client->search("Blinding", youtube::SearchFilter::All);
+    EXPECT(resAll.isOk(), "unfiltered search ok");
+    auto resSongs = client->search("Blinding", youtube::SearchFilter::Songs);
+    EXPECT(resSongs.isOk(), "filtered Songs search ok");
+    if (resSongs.isOk()) {
+        bool allSongs = true;
+        for(auto& r: resSongs.value()) if(r.type!=models::SearchResultType::Song) allSongs=false;
+        EXPECT(allSongs, "Songs filter returns only Songs");
+        EXPECT(resSongs.value().size() < resAll.value().size() || resSongs.value().size()==resAll.value().size(), "filtered <= unfiltered");
+    }
+    // Parsing filtered nested response: should still parse correctly (songs only)
+    std::string filteredJson = R"json({
+  "contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [{"musicShelfRenderer": {"title": {"runs": [{"text": "Songs"}]}, "contents": [
+    {"musicResponsiveListItemRenderer": {"flexColumns": [{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Filtered Song"}]}}}], "navigationEndpoint": {"watchEndpoint": {"videoId": "vidFiltered"}}}}
+  ]}}]}}}}]}}
+})json";
+    auto page = youtube::YouTubeClient::parseSearchPage(filteredJson);
+    EXPECT(page.isOk() && page.value().results.size()==1 && page.value().results[0].title=="Filtered Song", "filtered parsing ok");
+}
+
 int main(){
     test_flat_mock_still_works();
     test_innerTube_search_nested();
     test_twoRow_and_artist_album_playlist();
     test_library_grid();
+    test_library_pagination();
     test_missing_optional_fields();
     test_malformed_json();
     test_continuation_parsing();
@@ -308,6 +493,8 @@ int main(){
     test_api_error_response();
     test_empty_search_response();
     test_innertube_url_and_body();
+    test_search_filter();
+    test_innertube_auth_context_hardening();
     std::cout<<"\n=== YouTube InnerTube Tests: "<<passed<<" passed, "<<failed<<" failed ===\n";
     return failed==0?0:1;
 }

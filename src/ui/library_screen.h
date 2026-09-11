@@ -4,6 +4,7 @@
 #include "ui/screen.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@ public:
     void onEnter() override;
     void render(const Renderer& r) override;
     bool handleKey(const Key& key) override;
+    [[nodiscard]] std::optional<std::string> continuationToken() const noexcept { return continuationToken_; }
+    bool loadNextPage();
 
 private:
     void reload();
@@ -42,6 +45,7 @@ private:
     bool pendingG_ = false;
     std::string statusMsg_;
     bool loading_ = false;
+    std::optional<std::string> continuationToken_;
 };
 
 } // namespace myytm::ui

@@ -62,14 +62,14 @@ void SearchScreen::executeSearch()
 
     // Prefer YouTubeClient when wired (UI never builds HTTP directly)
     if (client_) {
-        auto res = client_->searchPage(query_, std::nullopt);
+        auto res = client_->searchPage(query_, std::nullopt, filter_);
         if (res.isOk()) {
             results_ = res.value().results;
             continuationToken_ = res.value().continuationToken;
             selected_ = 0;
             pendingG_ = false;
-            if (results_.empty()) statusMsg_ = "No results for \"" + committedQuery_ + "\"";
-            else if (continuationToken_) statusMsg_ = "Press > for more (" + std::to_string(results_.size()) + " results)";
+            if (results_.empty()) statusMsg_ = "No results for \"" + committedQuery_ + "\"" + (filter_ != youtube::SearchFilter::All ? " [" + youtube::searchFilterLabel(filter_) + "]" : "");
+            else if (continuationToken_) statusMsg_ = "Press > for more (" + std::to_string(results_.size()) + " results)" + (filter_ != youtube::SearchFilter::All ? " [" + youtube::searchFilterLabel(filter_) + "]" : "");
             else statusMsg_.clear();
             return;
         }
@@ -86,12 +86,22 @@ void SearchScreen::executeSearch()
         return;
     }
 
+    auto matchesFilter = [&](const models::SearchResult& r){
+        if (filter_ == youtube::SearchFilter::All) return true;
+        if (filter_ == youtube::SearchFilter::Songs) return r.type == models::SearchResultType::Song;
+        if (filter_ == youtube::SearchFilter::Videos) return r.type == models::SearchResultType::Song;
+        if (filter_ == youtube::SearchFilter::Albums) return r.type == models::SearchResultType::Album;
+        if (filter_ == youtube::SearchFilter::Artists) return r.type == models::SearchResultType::Artist;
+        if (filter_ == youtube::SearchFilter::Playlists) return r.type == models::SearchResultType::Playlist;
+        return true;
+    };
     if (query_.empty()) {
-        results_ = catalog_;
+        results_.clear();
+        for (auto& r : catalog_) if (matchesFilter(r)) results_.push_back(r);
     } else {
         results_.clear();
         for (auto& r : catalog_) {
-            if (containsCi(r.title, query_) || containsCi(r.subtitle, query_) || containsCi(r.typeLabel(), query_)) {
+            if (matchesFilter(r) && (containsCi(r.title, query_) || containsCi(r.subtitle, query_) || containsCi(r.typeLabel(), query_))) {
                 results_.push_back(r);
             }
         }
@@ -106,9 +116,24 @@ void SearchScreen::executeSearch()
     }
 }
 
+void SearchScreen::toggleSongsFilter() {
+    filter_ = (filter_ == youtube::SearchFilter::Songs ? youtube::SearchFilter::All : youtube::SearchFilter::Songs);
+    if (!committedQuery_.empty()) {
+        query_ = committedQuery_;
+        continuationToken_.reset();
+        executeSearch();
+    } else if (!query_.empty()) {
+        committedQuery_ = query_;
+        continuationToken_.reset();
+        executeSearch();
+    } else {
+        statusMsg_ = std::string("Filter: ") + youtube::searchFilterLabel(filter_);
+    }
+}
+
 bool SearchScreen::loadNextPage() {
     if (!client_ || !continuationToken_) return false;
-    auto res = client_->searchPage(committedQuery_, *continuationToken_);
+    auto res = client_->searchPage(committedQuery_, *continuationToken_, filter_);
     if (res.isErr()) {
         statusMsg_ = res.error().message;
         return false;
@@ -140,10 +165,11 @@ void SearchScreen::render(const Renderer& r)
         bar = "/" + query_ + "_";
         r.text(3, 1, Renderer::reverse(bar + std::string(static_cast<size_t>(std::max(0, w - 1 - static_cast<int>(bar.size()))), ' ')));
     } else {
+        std::string filterLabel = (filter_ != youtube::SearchFilter::All ? " [" + youtube::searchFilterLabel(filter_) + "]" : "");
         if (committedQuery_.empty() && query_.empty()) {
-            bar = "Press / to search  •  " + std::to_string(results_.size()) + " items  •  n/N next/prev  Esc exit";
+            bar = "Press / to search" + filterLabel + "  •  " + std::to_string(results_.size()) + " items  •  n/N next/prev  Esc exit";
         } else {
-            bar = "Query: \"" + committedQuery_ + "\"  (" + std::to_string(results_.size()) + " results)  —  / to refine";
+            bar = "Query: \"" + committedQuery_ + "\"" + filterLabel + "  (" + std::to_string(results_.size()) + " results)  —  / to refine";
         }
         if (static_cast<int>(bar.size()) > w - 1) bar = bar.substr(0, static_cast<size_t>(w - 1));
         r.text(3, 1, Renderer::dim(bar));
@@ -188,7 +214,7 @@ void SearchScreen::render(const Renderer& r)
     }
     std::string footer;
     if (mode_ == Mode::Input) footer = "Enter:search  Esc:cancel  Backspace:delete";
-    else footer = std::string("j/k:move  /:search  n/N:next/prev  gg/G:top/bottom  l:play  a/A:queue") + (continuationToken_ ? "  >:more" : "") + "  Esc:clear";
+    else footer = std::string("j/k:move  /:search  n/N:next/prev  gg/G:top/bottom  l:play  a/A:queue") + (filter_ != youtube::SearchFilter::All ? "  f:filter*" : "  f:filter") + (continuationToken_ ? "  >:more" : "") + "  Esc:clear";
     r.text(h - 1, 1, Renderer::dim(footer));
 }
 
@@ -285,6 +311,10 @@ bool SearchScreen::handleKey(const Key& key)
             return true;
         }
         statusMsg_ = "No more results";
+        return true;
+    }
+    if (key.code == KeyCode::Char && (key.ch == 'f' || key.ch == 'F')) {
+        toggleSongsFilter();
         return true;
     }
     pendingG_ = false;

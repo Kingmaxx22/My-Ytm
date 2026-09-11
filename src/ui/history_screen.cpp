@@ -12,11 +12,35 @@ void HistoryScreen::onEnter() { reload(); }
 void HistoryScreen::reload()
 {
     loading_ = true;
+    continuationToken_.reset();
     if (!client_) { items_.clear(); statusMsg_ = "Client not configured."; loading_ = false; return; }
-    auto res = client_->getHistory();
+    auto res = client_->getHistoryPage(std::nullopt);
     loading_ = false;
-    if (res.isOk()) { items_ = res.value(); selected_ = 0; statusMsg_.clear(); }
-    else { items_.clear(); statusMsg_ = res.error().message; }
+    if (res.isOk()) {
+        items_ = res.value().results;
+        continuationToken_ = res.value().continuationToken;
+        selected_ = 0;
+        if (continuationToken_) statusMsg_ = "Press > for more (" + std::to_string(items_.size()) + " recent)";
+        else statusMsg_.clear();
+    } else { items_.clear(); continuationToken_.reset(); statusMsg_ = res.error().message; }
+}
+
+bool HistoryScreen::loadNextPage()
+{
+    if (!client_ || !continuationToken_) return false;
+    loading_ = true;
+    auto res = client_->getHistoryPage(*continuationToken_);
+    loading_ = false;
+    if (res.isErr()) { statusMsg_ = res.error().message; return false; }
+    auto& page = res.value();
+    size_t before = items_.size();
+    items_.insert(items_.end(), page.results.begin(), page.results.end());
+    continuationToken_ = page.continuationToken;
+    if (page.results.empty() && !continuationToken_) statusMsg_ = "No more results";
+    else if (continuationToken_) statusMsg_ = "Loaded " + std::to_string(page.results.size()) + " more (total " + std::to_string(items_.size()) + ") — > for more";
+    else statusMsg_.clear();
+    if (selected_ < before) {} else selected_ = before;
+    return true;
 }
 
 void HistoryScreen::render(const Renderer& r)
@@ -27,6 +51,7 @@ void HistoryScreen::render(const Renderer& r)
     r.hline(2, 1, w);
     if (loading_) r.text(3, 1, Renderer::dim("Loading history..."));
     else if (!statusMsg_.empty()) r.text(3, 1, Renderer::dim(statusMsg_));
+    else if (continuationToken_) r.text(3, 1, Renderer::dim(std::to_string(items_.size()) + " recent — a/A queue, Enter replay, r reload, > for more"));
     else r.text(3, 1, Renderer::dim(std::to_string(items_.size()) + " recent — a/A queue, Enter replay, r reload"));
     int firstRow = 5;
     int visible = h - 6;
@@ -51,12 +76,19 @@ void HistoryScreen::render(const Renderer& r)
             else r.text(row, 1, line);
         }
     }
-    r.text(h - 1, 1, Renderer::dim("j/k:move  gg/G:top/bottom  a/A:queue  l/Enter:replay  r:reload"));
+    if (continuationToken_ && !loading_ && statusMsg_.empty()) r.text(h - 2, 1, Renderer::dim("More available — press > to load next page"));
+    std::string footer = std::string("j/k:move  gg/G:top/bottom  a/A:queue  l/Enter:replay  r:reload") + (continuationToken_ ? "  >:more" : "");
+    r.text(h - 1, 1, Renderer::dim(footer));
 }
 
 bool HistoryScreen::handleKey(const Key& key)
 {
     if (key.code == KeyCode::Char && key.ch == 'r') { reload(); return true; }
+    if (key.code == KeyCode::Char && key.ch == '>') {
+        if (continuationToken_) { loadNextPage(); return true; }
+        statusMsg_ = "No more results";
+        return true;
+    }
     if (keymap::isDown(key)) { moveDown(); return true; }
     if (keymap::isUp(key)) { moveUp(); return true; }
     if (keymap::isLast(key)) { goBottom(); pendingG_ = false; return true; }

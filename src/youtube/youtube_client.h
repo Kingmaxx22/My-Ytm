@@ -27,8 +27,8 @@ public:
         std::optional<std::string> continuationToken;
     };
 
-    [[nodiscard]] Result<models::SearchResults> search(std::string_view query);
-    [[nodiscard]] Result<SearchPage> searchPage(std::string_view query, std::optional<std::string_view> continuation = std::nullopt);
+    [[nodiscard]] Result<models::SearchResults> search(std::string_view query, SearchFilter filter = SearchFilter::All);
+    [[nodiscard]] Result<SearchPage> searchPage(std::string_view query, std::optional<std::string_view> continuation = std::nullopt, SearchFilter filter = SearchFilter::All);
     [[nodiscard]] Result<models::SearchResults> getLibrary();
     [[nodiscard]] Result<models::SearchResults> getPlaylists();
     [[nodiscard]] Result<models::SearchResults> getHistory();
@@ -50,7 +50,7 @@ public:
 
 private:
     static std::string urlEncode(std::string_view s);
-    static Result<models::SearchResults> fallbackLocalSearch(std::string_view query);
+    static Result<models::SearchResults> fallbackLocalSearch(std::string_view query, SearchFilter filter = SearchFilter::All);
     void attachAuth(HttpRequest& req) const;
     [[nodiscard]] Result<std::string> innertubePost(std::string_view endpoint, const std::string& jsonBody) const;
     [[nodiscard]] static Result<std::string> handleInnertubeResponse(const HttpResponse& resp);
@@ -60,7 +60,7 @@ private:
     std::string baseUrl_;
     bool useMockSearch_ = true; // true: parse MockHttpClient JSON; false: would hit network
     std::function<std::optional<std::string>()> authHeaderProvider_;
-    InnertubeConfig innertubeConfig_;
+    mutable InnertubeConfig innertubeConfig_;
 };
 
 } // namespace myytm::youtube
