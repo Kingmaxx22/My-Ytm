@@ -78,7 +78,7 @@ int App::run()
     std::shared_ptr<player::Player> player = std::make_shared<platform::PlatformAudioPlayer>(queue);
     player->setVolume(cfgMgr.get().volume);
 
-    // YouTubeClient — real WinHTTP (platform/http_winhttp) + auth header, fallback to mock data offline
+    // YouTubeClient — real WinHTTP (platform/http) + auth header, fallback to mock data offline
     auto ytClient = std::make_shared<youtube::YouTubeClient>(std::make_unique<youtube::WinHttpClient>());
     ytClient->setAuthHeaderProvider([authManager](){ return authManager->authorizationHeader(); });
 
