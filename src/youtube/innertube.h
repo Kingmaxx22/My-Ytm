@@ -1,0 +1,31 @@
+#pragma once
+#include <optional>
+#include <string>
+#include <string_view>
+
+namespace myytm::youtube {
+
+// InnerTube configuration — API key never logged, client version tracked.
+struct InnertubeConfig {
+    std::string apiKey; // empty → env MY_YTM_API_KEY or default public key
+    std::string clientName = "WEB_REMIX";
+    std::string clientVersion = "1.20240702.01.00";
+    std::string baseUrl = "https://music.youtube.com";
+    std::string hl = "en";
+    std::string gl = "US";
+};
+
+// Helpers — keep credentials out of logs, reuse ConfigManager integration.
+std::string effectiveApiKey(const InnertubeConfig& cfg);
+std::string buildInnertubeUrl(const InnertubeConfig& cfg, std::string_view endpoint);
+std::string buildInnertubeContextJson(const InnertubeConfig& cfg);
+std::string buildSearchBody(const InnertubeConfig& cfg, std::string_view query, std::optional<std::string_view> continuation = std::nullopt);
+std::string buildBrowseBody(const InnertubeConfig& cfg, std::string_view browseId, std::optional<std::string_view> params = std::nullopt, std::optional<std::string_view> continuation = std::nullopt);
+std::string buildLibraryBrowseBody(const InnertubeConfig& cfg, std::optional<std::string_view> continuation = std::nullopt);
+std::string buildPlaylistsBrowseBody(const InnertubeConfig& cfg, std::optional<std::string_view> continuation = std::nullopt);
+std::string buildHistoryBrowseBody(const InnertubeConfig& cfg, std::optional<std::string_view> continuation = std::nullopt);
+
+// JSON escaping for request bodies (query, browseId, etc.)
+std::string jsonEscape(std::string_view s);
+
+} // namespace myytm::youtube

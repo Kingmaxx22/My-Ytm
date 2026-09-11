@@ -34,6 +34,8 @@ public:
     [[nodiscard]] const models::SearchResults& results() const noexcept { return results_; }
     void setQuery(std::string q);
     void executeSearch();
+    [[nodiscard]] bool loadNextPage();
+    [[nodiscard]] std::optional<std::string> continuationToken() const noexcept { return continuationToken_; }
     void setClient(std::shared_ptr<youtube::YouTubeClient> c) { client_ = std::move(c); }
     void setQueue(std::shared_ptr<player::Queue> q) { queue_ = std::move(q); }
     void setPlayer(std::shared_ptr<player::Player> p) { player_ = std::move(p); }
@@ -59,6 +61,7 @@ private:
     size_t selected_ = 0;
     bool pendingG_ = false;
     std::string statusMsg_;
+    std::optional<std::string> continuationToken_;
     std::shared_ptr<youtube::YouTubeClient> client_;
     std::shared_ptr<player::Queue> queue_;
     std::shared_ptr<player::Player> player_;

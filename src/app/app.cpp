@@ -21,6 +21,7 @@
 #include "ui/status_bar.h"
 #include "ui/terminal.h"
 #include "youtube/http_client.h"
+#include "youtube/innertube.h"
 #include "youtube/youtube_client.h"
 
 #include <iostream>
@@ -78,9 +79,17 @@ int App::run()
     std::shared_ptr<player::Player> player = std::make_shared<platform::PlatformAudioPlayer>(queue);
     player->setVolume(cfgMgr.get().volume);
 
-    // YouTubeClient — real WinHTTP (platform/http) + auth header, fallback to mock data offline
+    // YouTubeClient — InnerTube POST with API key + client context, auth header, fallback mock offline
     auto ytClient = std::make_shared<youtube::YouTubeClient>(std::make_unique<youtube::WinHttpClient>());
     ytClient->setAuthHeaderProvider([authManager](){ return authManager->authorizationHeader(); });
+    {
+        youtube::InnertubeConfig icfg;
+        icfg.apiKey = cfgMgr.get().youtubeApiKey;
+        icfg.clientName = cfgMgr.get().youtubeClientName;
+        icfg.clientVersion = cfgMgr.get().youtubeClientVersion;
+        icfg.baseUrl = cfgMgr.get().youtubeBaseUrl;
+        ytClient->setInnertubeConfig(icfg);
+    }
 
     // Screens: 0=Home,1=Search,2=Library(pl),3=Playlists(pl),4=History(pl),5=Account,6=Queue
     std::vector<std::unique_ptr<Screen>> screens;

@@ -58,21 +58,23 @@ void SearchScreen::setQuery(std::string q)
 void SearchScreen::executeSearch()
 {
     committedQuery_ = query_;
+    continuationToken_.reset();
 
     // Prefer YouTubeClient when wired (UI never builds HTTP directly)
     if (client_) {
-        auto res = client_->search(query_);
+        auto res = client_->searchPage(query_, std::nullopt);
         if (res.isOk()) {
-            results_ = res.value();
+            results_ = res.value().results;
+            continuationToken_ = res.value().continuationToken;
             selected_ = 0;
             pendingG_ = false;
             if (results_.empty()) statusMsg_ = "No results for \"" + committedQuery_ + "\"";
+            else if (continuationToken_) statusMsg_ = "Press > for more (" + std::to_string(results_.size()) + " results)";
             else statusMsg_.clear();
             return;
         }
         // Error path: user-facing message, no secrets, keep previous results fallback
         statusMsg_ = res.error().message;
-        // On auth/rate-limit we still show empty with message; on network we keep catalog
         if (res.error().kind == youtube::ErrorKind::Parse) {
             results_.clear();
         } else if (results_.empty()) {
@@ -80,6 +82,7 @@ void SearchScreen::executeSearch()
         }
         selected_ = 0;
         pendingG_ = false;
+        continuationToken_.reset();
         return;
     }
 
@@ -95,11 +98,32 @@ void SearchScreen::executeSearch()
     }
     selected_ = 0;
     pendingG_ = false;
+    continuationToken_.reset();
     if (results_.empty()) {
         statusMsg_ = "No results for \"" + committedQuery_ + "\"";
     } else {
         statusMsg_.clear();
     }
+}
+
+bool SearchScreen::loadNextPage() {
+    if (!client_ || !continuationToken_) return false;
+    auto res = client_->searchPage(committedQuery_, *continuationToken_);
+    if (res.isErr()) {
+        statusMsg_ = res.error().message;
+        return false;
+    }
+    // Append without corrupting existing results
+    auto& page = res.value();
+    size_t before = results_.size();
+    results_.insert(results_.end(), page.results.begin(), page.results.end());
+    continuationToken_ = page.continuationToken;
+    if (page.results.empty() && !continuationToken_) statusMsg_ = "No more results";
+    else if (continuationToken_) statusMsg_ = "Loaded " + std::to_string(page.results.size()) + " more (total " + std::to_string(results_.size()) + ") — > for more";
+    else statusMsg_.clear();
+    // Keep selection at previous end
+    if (selected_ < before) { /* keep */ } else selected_ = before;
+    return true;
 }
 
 void SearchScreen::render(const Renderer& r)
@@ -158,12 +182,13 @@ void SearchScreen::render(const Renderer& r)
     }
 
     if (!statusMsg_.empty()) {
-        // Show statusMsg as transient bar above footer
         r.text(h - 2, 1, Renderer::dim(statusMsg_));
+    } else if (continuationToken_) {
+        r.text(h - 2, 1, Renderer::dim("More results available — press > to load next page"));
     }
     std::string footer;
     if (mode_ == Mode::Input) footer = "Enter:search  Esc:cancel  Backspace:delete";
-    else footer = "j/k:move  /:search  n/N:next/prev  gg/G:top/bottom  l:play  a/A:queue  Esc:clear";
+    else footer = std::string("j/k:move  /:search  n/N:next/prev  gg/G:top/bottom  l:play  a/A:queue") + (continuationToken_ ? "  >:more" : "") + "  Esc:clear";
     r.text(h - 1, 1, Renderer::dim(footer));
 }
 
@@ -252,6 +277,15 @@ bool SearchScreen::handleKey(const Key& key)
             }
             return true;
         }
+    }
+    if (key.code == KeyCode::Char && key.ch == '>') {
+        if (continuationToken_) {
+            if (loadNextPage()) return true;
+            statusMsg_ = "Failed to load more";
+            return true;
+        }
+        statusMsg_ = "No more results";
+        return true;
     }
     pendingG_ = false;
     return false;

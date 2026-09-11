@@ -13,6 +13,12 @@ struct Config {
     int cacheSizeMb = 100;
     std::string lastScreen = "Home"; // Home/Search/...
 
+    // InnerTube / YouTube Music — never log apiKey
+    std::string youtubeApiKey; // empty → use env MY_YTM_API_KEY or default public key
+    std::string youtubeClientName = "WEB_REMIX";
+    std::string youtubeClientVersion = "1.20240702.01.00";
+    std::string youtubeBaseUrl = "https://music.youtube.com";
+
     [[nodiscard]] bool isValid() const noexcept { return volume >= 0 && volume <= 100; }
 };
 

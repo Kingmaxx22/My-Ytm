@@ -22,6 +22,8 @@ add_executable(MyYtm
     src/ui/search_screen.cpp
     src/youtube/http_client.cpp
     src/youtube/youtube_client.cpp
+    src/youtube/innertube.cpp
+    src/youtube/json.cpp
     src/auth/credential_store.cpp
     src/auth/auth_manager.cpp
     src/ui/auth_screen.cpp
@@ -63,6 +65,8 @@ add_executable(MyYtmUiTests
     src/ui/search_screen.cpp
     src/youtube/http_client.cpp
     src/youtube/youtube_client.cpp
+    src/youtube/innertube.cpp
+    src/youtube/json.cpp
     src/auth/credential_store.cpp
     src/auth/auth_manager.cpp
     src/ui/auth_screen.cpp
@@ -104,6 +108,21 @@ if(WIN32)
     target_link_libraries(MyYtmOAuthHardeningTests PRIVATE crypt32 shell32 winhttp ws2_32 bcrypt)
 endif()
 add_test(NAME OAuthHardeningTests COMMAND MyYtmOAuthHardeningTests)
+
+add_executable(MyYtmYoutubeTests
+    tests/test_youtube_innertube.cpp
+    src/youtube/http_client.cpp
+    src/youtube/youtube_client.cpp
+    src/youtube/innertube.cpp
+    src/youtube/json.cpp
+    src/platform/http/WinHttpClient.cpp
+    src/platform/crypto/CryptoWin.cpp
+)
+target_include_directories(MyYtmYoutubeTests PRIVATE src)
+if(WIN32)
+    target_link_libraries(MyYtmYoutubeTests PRIVATE crypt32 bcrypt winhttp ws2_32)
+endif()
+add_test(NAME YoutubeTests COMMAND MyYtmYoutubeTests)
 
 # Windows packaging (Phase 8) — ZIP + NSIS + MSI (WIX) with choosable install dir
 include(InstallRequiredSystemLibraries)
