@@ -23,3 +23,6 @@ install_manifest.txt
 # IDE
 .idea/
 .vscode/
+
+# CPack generated files
+_CPack_Packages/

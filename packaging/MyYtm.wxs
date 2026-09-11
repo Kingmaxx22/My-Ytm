@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="My-Ytm" Version="0.1.0" Manufacturer="MyYtm" UpgradeCode="A1B2C3D4-E5F6-4A1B-8C9D-0E1F2A3B4C5D" Language="1033" Codepage="1252" Scope="perMachine">
+    <SummaryInformation Keywords="Installer" Description="My-Ytm — Windows-first YouTube Music TUI" Manufacturer="MyYtm" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of My-Ytm is already installed." />
+    <Media Id="1" Cabinet="MyYtm.cab" EmbedCab="yes" />
+
+    <!-- Directory chooser: WixUI_InstallDir lets user pick INSTALLFOLDER -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <Feature Id="ProductFeature" Title="MyYtm" Level="1" Description="My-Ytm executable and shortcuts">
+      <ComponentGroupRef Id="MyYtmFiles" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="MyYtm">
+        <Component Id="MyYtmExe" Guid="F6E5D4C3-B2A1-4F6E-8D9C-0A1B2C3D4E5F" Bitness="always64">
+          <File Id="MyYtmExeFile" Source="D:\Gawe\My-Ytm\build\Release\MyYtm.exe" KeyPath="yes" />
+          <!-- Allow MSI to choose location: INSTALLFOLDER is WIXUI_INSTALLDIR target -->
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="MyYtmFiles" Directory="INSTALLFOLDER">
+      <ComponentRef Id="MyYtmExe" />
+    </ComponentGroup>
+
+    <!-- Start Menu shortcut under ProgramMenuFolder\MyYtm -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="MyYtm">
+        <Component Id="ApplicationShortcut" Guid="B1A2C3D4-E5F6-4B2C-9D8E-1F2A3B4C5D6E" Bitness="always64" Directory="ApplicationProgramsFolder">
+          <Shortcut Id="ApplicationStartMenuShortcut" Name="My-Ytm" Description="Windows-first YouTube Music TUI" Target="[INSTALLFOLDER]MyYtm.exe" WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\MyYtm" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+  </Package>
+</Wix>

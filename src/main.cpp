@@ -1,7 +1,7 @@
-#include <iostream>
+#include "app/app.h"
 
 int main()
 {
-    std::cout << "My-Ytm\n";
-    return 0;
+    myytm::app::App app;
+    return app.run();
 }
