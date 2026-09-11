@@ -230,6 +230,7 @@ Result<models::SearchResults> YouTubeClient::getLibrary()
     if (!http_) return Result<models::SearchResults>::err(Error::network("HTTP client not configured"));
     std::string url = baseUrl_ + "/youtubei/v1/library";
     HttpRequest req{url, "GET", {{"Accept","application/json"}}, "", std::chrono::milliseconds{8000}};
+    attachAuth(req);
     HttpResponse resp = http_->execute(req);
     if (!resp.errorMessage.empty() && resp.statusCode == 0) {
         // Mock: return liked/library payload
@@ -251,6 +252,7 @@ Result<models::SearchResults> YouTubeClient::getPlaylists()
     if (!http_) return Result<models::SearchResults>::err(Error::network("HTTP client not configured"));
     std::string url = baseUrl_ + "/youtubei/v1/playlists";
     HttpRequest req{url, "GET", {{"Accept","application/json"}}, "", std::chrono::milliseconds{8000}};
+    attachAuth(req);
     HttpResponse resp = http_->execute(req);
     if (!resp.errorMessage.empty() && resp.statusCode == 0) {
         std::string demo = R"json({"results":[
@@ -270,6 +272,7 @@ Result<models::SearchResults> YouTubeClient::getHistory()
     if (!http_) return Result<models::SearchResults>::err(Error::network("HTTP client not configured"));
     std::string url = baseUrl_ + "/youtubei/v1/history";
     HttpRequest req{url, "GET", {{"Accept","application/json"}}, "", std::chrono::milliseconds{8000}};
+    attachAuth(req);
     HttpResponse resp = http_->execute(req);
     if (!resp.errorMessage.empty() && resp.statusCode == 0) {
         std::string demo = R"json({"results":[
@@ -284,18 +287,37 @@ Result<models::SearchResults> YouTubeClient::getHistory()
     return parseSearchResponse(resp.body);
 }
 
+void YouTubeClient::attachAuth(HttpRequest& req) const {
+    if (authHeaderProvider_) {
+        if (auto h = authHeaderProvider_()) req.headers["Authorization"] = *h;
+    }
+}
+
 Result<models::SearchResults> YouTubeClient::search(std::string_view query)
 {
     if (!http_) return Result<models::SearchResults>::err(Error::network("HTTP client not configured"));
 
     // Keep request construction isolated — UI never builds URLs.
-    std::string url = baseUrl_ + "/youtubei/v1/search?query=" + urlEncode(query);
-
+    // Real YouTube Music innertube uses POST with JSON context; we support both.
+    // If auth is available, attach Bearer and try POST first, fallback to GET/mock.
+    bool usePost = authHeaderProvider_ && authHeaderProvider_().has_value();
+    std::string url;
     HttpRequest req;
-    req.url = url;
-    req.method = "GET";
-    req.headers = {{"Accept", "application/json"}};
+    if (usePost) {
+        url = baseUrl_ + "/youtubei/v1/search";
+        req.url = url;
+        req.method = "POST";
+        req.headers = {{"Accept", "application/json"}, {"Content-Type","application/json"}};
+        // Minimal innertube context — real clientVersion is negotiated, but this is sufficient for demo
+        req.body = std::string(R"({"context":{"client":{"clientName":"WEB_REMIX","clientVersion":"1.20240101.00.00"}},"query":")") + std::string(query) + "\"}";
+    } else {
+        url = baseUrl_ + "/youtubei/v1/search?query=" + urlEncode(query);
+        req.url = url;
+        req.method = "GET";
+        req.headers = {{"Accept", "application/json"}};
+    }
     req.timeout = std::chrono::milliseconds{8000};
+    attachAuth(req);
 
     HttpResponse resp = http_->execute(req);
 

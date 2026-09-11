@@ -1,4 +1,5 @@
 #include "youtube/http_client.h"
+#include "platform/http/IHttpClient.h"
 
 namespace myytm::youtube {
 
@@ -29,11 +30,11 @@ HttpResponse MockHttpClient::execute(const HttpRequest& req)
     return HttpResponse{200, demo, {}, ""};
 }
 
-HttpResponse WinHttpClient::execute(const HttpRequest&)
+HttpResponse WinHttpClient::execute(const HttpRequest& req)
 {
-    // Phase 4 stub: real WinHTTP wiring lives here (WinHttpOpen/Connect/Send/Receive)
-    // isolated per AGENTS.md Platform/Network. Returning explicit error so callers handle it.
-    return HttpResponse{0, "", {}, "WinHttpClient not yet configured — using MockHttpClient for search"};
+    // Delegate to platform/http — Keeps YouTube layer free of Win32 (AGENTS.md)
+    platform::WinHttpClient impl;
+    return impl.execute(req);
 }
 
 } // namespace myytm::youtube

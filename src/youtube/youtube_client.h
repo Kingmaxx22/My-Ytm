@@ -4,7 +4,9 @@
 #include "youtube/http_client.h"
 #include "youtube/result.h"
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -28,14 +30,17 @@ public:
     [[nodiscard]] static Result<models::SearchResults> parseSearchResponse(std::string_view body);
 
     IHttpClient* httpClient() const noexcept { return http_.get(); }
+    void setAuthHeaderProvider(std::function<std::optional<std::string>()> provider) { authHeaderProvider_ = std::move(provider); }
 
 private:
     static std::string urlEncode(std::string_view s);
     static Result<models::SearchResults> fallbackLocalSearch(std::string_view query);
+    void attachAuth(HttpRequest& req) const;
 
     std::unique_ptr<IHttpClient> http_;
     std::string baseUrl_;
     bool useMockSearch_ = true; // true: parse MockHttpClient JSON; false: would hit network
+    std::function<std::optional<std::string>()> authHeaderProvider_;
 };
 
 } // namespace myytm::youtube

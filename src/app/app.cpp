@@ -4,6 +4,7 @@
 #include "auth/auth_manager.h"
 #include "auth/credential_store.h"
 #include "config/config.h"
+#include "platform/audio_backend.h"
 #include "player/mock_player.h"
 #include "player/queue.h"
 #include "ui/auth_screen.h"
@@ -71,13 +72,15 @@ int App::run()
     if (authManager->restore()) logger.info("Auth restored: " + std::string(auth::toString(authManager->state())));
     else logger.info("Auth not restored: signed out");
 
-    // Player / Queue — App coordinates, UI never implements playback backend (AGENTS.md)
+    // Platform layer → WinHTTP → OAuth loopback → YouTube API → Audio
+    // Player / Queue — real audio backend (WinMM waveOut) isolated in src/platform per AGENTS.md
     auto queue = std::make_shared<player::Queue>();
-    auto player = std::make_shared<player::MockPlayer>(queue);
+    std::shared_ptr<player::Player> player = std::make_shared<platform::PlatformAudioPlayer>(queue);
     player->setVolume(cfgMgr.get().volume);
 
-    // YouTubeClient wired at App layer — UI never does HTTP (AGENTS.md:79)
-    auto ytClient = std::make_shared<youtube::YouTubeClient>(std::make_unique<youtube::MockHttpClient>());
+    // YouTubeClient — real WinHTTP (platform/http_winhttp) + auth header, fallback to mock data offline
+    auto ytClient = std::make_shared<youtube::YouTubeClient>(std::make_unique<youtube::WinHttpClient>());
+    ytClient->setAuthHeaderProvider([authManager](){ return authManager->authorizationHeader(); });
 
     // Screens: 0=Home,1=Search,2=Library(pl),3=Playlists(pl),4=History(pl),5=Account,6=Queue
     std::vector<std::unique_ptr<Screen>> screens;

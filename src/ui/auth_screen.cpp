@@ -1,5 +1,6 @@
 #include "ui/auth_screen.h"
 #include "ui/renderer.h"
+#include <cstdlib>
 
 namespace myytm::ui {
 
@@ -38,8 +39,17 @@ void AuthScreen::render(const Renderer& r)
 bool AuthScreen::handleKey(const Key& key)
 {
     if (key.code == KeyCode::Char && key.ch == 'o') {
-        bool ok = auth_->beginBrowserAuth();
-        msg_ = ok ? "Browser launched. Complete sign-in in browser, then press D for demo." : std::string(auth_->lastError());
+        // Real OAuth loopback: uses MY_YTM_CLIENT_ID / MY_YTM_CLIENT_SECRET env if set,
+        // otherwise falls back to demo browser launch. No password collected.
+        auth::AuthManager::OAuthConfig cfg;
+        if (const char* cid = std::getenv("MY_YTM_CLIENT_ID")) cfg.clientId = cid;
+        if (const char* csec = std::getenv("MY_YTM_CLIENT_SECRET")) cfg.clientSecret = csec;
+        if (const char* sc = std::getenv("MY_YTM_SCOPE")) cfg.scope = sc;
+        bool ok = false;
+        if (!cfg.clientId.empty()) ok = auth_->beginOAuthLoopback(cfg, std::chrono::minutes(5));
+        else ok = auth_->beginBrowserAuth();
+        msg_ = ok ? "Browser launched (loopback on 127.0.0.1). Complete sign-in, then return." : std::string(auth_->lastError());
+        if (ok && auth_->isSignedIn()) msg_ = "Signed in via loopback: " + std::string(auth_->session()->safeLabel());
         return true;
     }
     if (key.code == KeyCode::Char && key.ch == 'O') {

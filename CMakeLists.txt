@@ -31,6 +31,13 @@ add_executable(MyYtm
     src/ui/library_screen.cpp
     src/ui/playlists_screen.cpp
     src/ui/history_screen.cpp
+    src/platform/browser/BrowserLauncherWin.cpp
+    src/platform/crypto/CryptoWin.cpp
+    src/platform/credentials/CredentialStoreWin.cpp
+    src/platform/terminal/TerminalWin.cpp
+    src/platform/http/WinHttpClient.cpp
+    src/platform/oauth_loopback.cpp
+    src/platform/audio_backend.cpp
 )
 
 target_include_directories(MyYtm
@@ -39,7 +46,7 @@ target_include_directories(MyYtm
 )
 
 if(WIN32)
-    target_link_libraries(MyYtm PRIVATE crypt32 shell32)
+    target_link_libraries(MyYtm PRIVATE crypt32 shell32 winhttp ws2_32 winmm)
 endif()
 
 enable_testing()
@@ -65,12 +72,19 @@ add_executable(MyYtmUiTests
     src/ui/library_screen.cpp
     src/ui/playlists_screen.cpp
     src/ui/history_screen.cpp
+    src/platform/browser/BrowserLauncherWin.cpp
+    src/platform/crypto/CryptoWin.cpp
+    src/platform/credentials/CredentialStoreWin.cpp
+    src/platform/terminal/TerminalWin.cpp
+    src/platform/http/WinHttpClient.cpp
+    src/platform/oauth_loopback.cpp
+    src/platform/audio_backend.cpp
 )
 
 target_include_directories(MyYtmUiTests PRIVATE src)
 
 if(WIN32)
-    target_link_libraries(MyYtmUiTests PRIVATE crypt32 shell32)
+    target_link_libraries(MyYtmUiTests PRIVATE crypt32 shell32 winhttp ws2_32 winmm)
 endif()
 
 add_test(NAME UiTests COMMAND MyYtmUiTests)
