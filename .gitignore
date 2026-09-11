@@ -1,0 +1,25 @@
+# Build output
+build/
+out/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+
+# Compiled binaries
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+
+# IDE
+.idea/
+.vscode/
