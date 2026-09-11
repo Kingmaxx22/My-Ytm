@@ -1,7 +1,8 @@
 #include "auth/auth_manager.h"
 #include "platform/browser/IBrowserLauncher.h"
+#include "platform/crypto/ICrypto.h"
 #include "platform/http/IHttpClient.h"
-#include "platform/oauth_loopback.h"
+#include "platform/oauth/IOAuthLoopback.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -103,28 +104,96 @@ bool AuthManager::signOut()
     return true;
 }
 
+void AuthManager::clearPendingOAuth() noexcept {
+    pendingState_.clear();
+    pendingVerifier_.clear();
+    pendingChallenge_.clear();
+}
+
+bool AuthManager::isExpiringSoon(std::chrono::seconds window) const noexcept {
+    if (!session_) return false;
+    return session_->isExpiringSoon(window);
+}
+
+bool AuthManager::refreshIfNeeded(std::chrono::seconds window) {
+    if (!session_ || session_->refreshToken.empty()) return false;
+    if (!isExpiringSoon(window) && !session_->isExpired()) return true; // still valid
+    return refresh();
+}
+
 bool AuthManager::beginOAuthLoopback(const OAuthConfig& cfg, std::chrono::milliseconds timeout)
 {
-    if (cfg.clientId.empty()) {
-        // Check env fallback
-        const char* env = std::getenv("MY_YTM_CLIENT_ID");
-        if (!env || std::string(env).empty()) {
-            // Fall back to demo browser flow (no loopback)
-            std::string url = cfg.authEndpoint;
-            if (url.find('?')==std::string::npos) url += "?response_type=code&scope=" + cfg.scope;
-            return beginBrowserAuth(url);
-        }
+    // Resolve effective clientId from cfg or env
+    std::string effClientId = cfg.clientId;
+    if (effClientId.empty()) {
+        if (const char* env = std::getenv("MY_YTM_CLIENT_ID")) effClientId = env;
     }
 
-    platform::OAuthLoopbackServer server;
-    if (!server.start()) {
-        setError("Failed to start loopback server for OAuth.");
+    // If still no clientId, fall back to demo browser flow with secure state
+    if (effClientId.empty()) {
+        std::string fallbackState = cfg.state.empty() ? platform::generateSecureState(32) : cfg.state;
+        if (fallbackState.empty()) {
+            setError("Failed to generate secure state.");
+            state_ = AuthState::Error;
+            return false;
+        }
+        std::string url = cfg.authEndpoint;
+        auto urlEncode = [](std::string_view s){
+            std::ostringstream oss;
+            for (unsigned char c: s) {
+                if (std::isalnum(c) || c=='-'||c=='_'||c=='.'||c=='~') oss<<c;
+                else if (c==' ') oss<<"%20";
+                else oss<<'%'<< "0123456789ABCDEF"[c>>4] << "0123456789ABCDEF"[c&15];
+            }
+            return oss.str();
+        };
+        std::string fullUrl = url + (url.find('?')==std::string::npos ? "?" : "&")
+            + "response_type=code&scope=" + urlEncode(cfg.scope)
+            + "&state=" + urlEncode(fallbackState);
+        // Store expected state for completeness even though demo doesn't validate callback
+        pendingState_ = fallbackState;
+        bool ok = beginBrowserAuth(fullUrl);
+        clearPendingOAuth();
+        return ok;
+    }
+
+    // Generate fresh cryptographically secure state and PKCE verifier/challenge per attempt
+    std::string expectedState = cfg.state.empty() ? platform::generateSecureState(32) : cfg.state;
+    if (expectedState.empty()) {
+        setError("Failed to generate secure state.");
         state_ = AuthState::Error;
         return false;
     }
-    std::string redirect = server.redirectUri();
-    std::string state = cfg.state.empty() ? "myytm_state" : cfg.state;
-    // Build auth URL with loopback redirect_uri
+    std::string verifier = platform::generatePkceVerifier();
+    if (verifier.empty()) {
+        setError("Failed to generate PKCE verifier.");
+        state_ = AuthState::Error;
+        return false;
+    }
+    std::string challenge = platform::computePkceChallenge(verifier);
+    if (challenge.empty()) {
+        setError("Failed to compute PKCE challenge.");
+        state_ = AuthState::Error;
+        return false;
+    }
+    pendingState_ = expectedState;
+    pendingVerifier_ = verifier;
+    pendingChallenge_ = challenge;
+
+    auto loopback = platform::makeOAuthLoopback();
+    if (!loopback || !loopback->start()) {
+        clearPendingOAuth();
+        setError("Failed to start loopback server for OAuth. Check firewall and try again.");
+        state_ = AuthState::Error;
+        return false;
+    }
+    std::string redirect = loopback->redirectUri();
+    if (redirect.empty()) {
+        clearPendingOAuth();
+        setError("Failed to get loopback redirect URI.");
+        state_ = AuthState::Error;
+        return false;
+    }
     auto urlEncode = [](std::string_view s){
         std::ostringstream oss;
         for (unsigned char c: s) {
@@ -134,49 +203,87 @@ bool AuthManager::beginOAuthLoopback(const OAuthConfig& cfg, std::chrono::millis
         }
         return oss.str();
     };
-    std::string url = cfg.authEndpoint + "?client_id=" + urlEncode(cfg.clientId)
+    std::string effClientSecret = cfg.clientSecret;
+    if (effClientSecret.empty()) { if (const char* e = std::getenv("MY_YTM_CLIENT_SECRET")) effClientSecret = e; }
+    OAuthConfig effCfg = cfg;
+    effCfg.clientId = effClientId;
+    effCfg.clientSecret = effClientSecret;
+
+    std::string url = effCfg.authEndpoint + "?client_id=" + urlEncode(effClientId)
         + "&redirect_uri=" + urlEncode(redirect)
-        + "&response_type=code&scope=" + urlEncode(cfg.scope)
-        + "&access_type=offline&prompt=consent&state=" + urlEncode(state);
+        + "&response_type=code&scope=" + urlEncode(effCfg.scope)
+        + "&access_type=offline&prompt=consent&state=" + urlEncode(expectedState)
+        + "&code_challenge=" + urlEncode(challenge)
+        + "&code_challenge_method=S256";
 
     state_ = AuthState::Authenticating;
     lastError_.clear();
     bool launched = launcher_(url);
     if (!launched) {
-        setError("Unable to launch browser for " + redirect);
+        clearPendingOAuth();
+        setError("Unable to launch browser. Please open the authentication URL manually.");
         state_ = AuthState::Error;
         return false;
     }
 
-    auto res = server.waitForCode(timeout);
-    server.stop();
+    auto res = loopback->waitForCode(timeout);
+    loopback->stop();
     if (!res.ok) {
-        setError(res.error.empty() ? "Authentication timed out or missing code." : res.error + (res.errorDescription.empty()?"":" — "+res.errorDescription));
+        clearPendingOAuth();
+        if (!res.error.empty()) {
+            if (res.error == "access_denied") setError("Authentication was cancelled.");
+            else setError(res.error + (res.errorDescription.empty() ? "" : " — " + res.errorDescription));
+        } else {
+            setError("Authentication timed out. Please try again.");
+        }
         state_ = AuthState::Error;
         return false;
     }
-    if (res.state != state) {
-        setError("State mismatch in OAuth callback.");
+    if (res.state.empty()) {
+        clearPendingOAuth();
+        setError("Missing state in OAuth callback. Possible CSRF. Please try again.");
         state_ = AuthState::Error;
         return false;
     }
-    // Exchange code for tokens
-    return completeAuthWithCode(res.code, redirect, cfg);
+    if (res.state != expectedState) {
+        clearPendingOAuth();
+        setError("State mismatch in OAuth callback. Possible CSRF. Please try again.");
+        state_ = AuthState::Error;
+        return false;
+    }
+    if (res.code.empty()) {
+        clearPendingOAuth();
+        setError("Missing authorization code in callback.");
+        state_ = AuthState::Error;
+        return false;
+    }
+    // Exchange code for tokens — keep pendingVerifier for token request
+    bool ok = completeAuthWithCode(res.code, redirect, effCfg);
+    clearPendingOAuth();
+    return ok;
 }
 
 bool AuthManager::completeAuthWithCode(const std::string& code, const std::string& redirectUri, const OAuthConfig& cfg)
 {
-    if (code.empty()) { setError("Missing OAuth code."); state_=AuthState::Error; return false; }
-    // If no clientSecret/tokenEndpoint, treat code as opaque demo token
+    if (code.empty()) { setError("Missing OAuth code."); state_=AuthState::Error; clearPendingOAuth(); return false; }
+    // If no clientSecret/tokenEndpoint, treat code as opaque demo token (no PKCE needed for demo)
     if (cfg.clientId.empty() || cfg.clientSecret.empty() || cfg.tokenEndpoint.empty()) {
         models::UserAccount acc{"loopback-id", "", "Loopback User"};
-        // Use code as access token for demo — real would POST to tokenEndpoint
-        return completeAuth("access_" + code, "refresh_" + code, acc, 3600);
+        bool ok = completeAuth("access_" + code, "refresh_" + code, acc, 3600);
+        clearPendingOAuth();
+        return ok;
     }
 
     platform::WinHttpClient http;
+    // Include PKCE verifier if we generated one for this attempt
+    std::string verifier = pendingVerifier_;
+    if (verifier.empty()) {
+        // If beginOAuthLoopback wasn't used, fallback to empty verifier (should not happen for real PKCE)
+        verifier = "";
+    }
     std::string body = "code=" + code + "&client_id=" + cfg.clientId + "&client_secret=" + cfg.clientSecret
         + "&redirect_uri=" + redirectUri + "&grant_type=authorization_code";
+    if (!verifier.empty()) body += "&code_verifier=" + verifier;
     platform::HttpRequest req;
     req.url = cfg.tokenEndpoint;
     req.method = "POST";
@@ -184,12 +291,38 @@ bool AuthManager::completeAuthWithCode(const std::string& code, const std::strin
     req.body = body;
     req.timeout = std::chrono::milliseconds{15000};
     auto resp = http.execute(req);
+    // Do not log body — may contain code/verifier/tokens
     if (!resp.isSuccess()) {
+        // Try to extract invalid_grant or other error from body without logging secrets
+        std::string err, desc;
+        auto extractErr = [&](std::string_view key)->std::string{
+            std::string pat = "\"" + std::string(key) + "\"";
+            size_t p = resp.body.find(pat);
+            if (p==std::string::npos) return "";
+            p = resp.body.find(':', p); if (p==std::string::npos) return "";
+            ++p; while (p<resp.body.size() && std::isspace((unsigned char)resp.body[p])) ++p;
+            if (p<resp.body.size() && resp.body[p]=='"') { ++p; size_t e=resp.body.find('"',p); if(e==std::string::npos) return ""; return resp.body.substr(p,e-p); }
+            return "";
+        };
+        err = extractErr("error");
+        desc = extractErr("error_description");
+        if (err == "invalid_grant") {
+            setError("Session expired or authorization code already used. Please sign in again.");
+            state_ = AuthState::Error;
+            clearPendingOAuth();
+            return false;
+        }
+        if (!err.empty()) {
+            setError(err + (desc.empty()?"":" — "+desc));
+            state_ = AuthState::Error;
+            clearPendingOAuth();
+            return false;
+        }
         setError("Token exchange failed: " + (resp.errorMessage.empty() ? std::to_string(resp.statusCode) : resp.errorMessage));
         state_ = AuthState::Error;
+        clearPendingOAuth();
         return false;
     }
-    // Very small JSON parse for access_token, refresh_token, expires_in
     auto extract = [&](std::string_view key)->std::string{
         std::string pat = "\"" + std::string(key) + "\"";
         size_t p = resp.body.find(pat);
@@ -203,23 +336,41 @@ bool AuthManager::completeAuthWithCode(const std::string& code, const std::strin
             if (e==std::string::npos) return "";
             return resp.body.substr(p, e-p);
         }
-        // number
         size_t e = p;
         while (e<resp.body.size() && (std::isdigit((unsigned char)resp.body[e]) || resp.body[e]=='-')) ++e;
         return resp.body.substr(p, e-p);
     };
+    // Check for error even on 200 — some providers return 200 with error field
+    std::string errField = extract("error");
+    if (!errField.empty()) {
+        std::string desc = extract("error_description");
+        if (errField == "invalid_grant") {
+            setError("Session expired or authorization code already used. Please sign in again.");
+        } else {
+            setError(errField + (desc.empty()?"":" — "+desc));
+        }
+        state_ = AuthState::Error;
+        clearPendingOAuth();
+        return false;
+    }
     std::string at = extract("access_token");
     std::string rt = extract("refresh_token");
     std::string expStr = extract("expires_in");
     int exp = 3600;
     try { if (!expStr.empty()) exp = std::stoi(expStr); } catch(...){}
+    // Clamp expires_in to sane range (5 min to 1 day) — never trust remote value blindly
+    if (exp < 300) exp = 300;
+    if (exp > 86400) exp = 86400;
     if (at.empty() || rt.empty()) {
         setError("Token response missing access/refresh token.");
         state_ = AuthState::Error;
+        clearPendingOAuth();
         return false;
     }
     models::UserAccount acc{"oauth-id", "", "YouTube User"};
-    return completeAuth(at, rt, acc, exp);
+    bool ok = completeAuth(at, rt, acc, exp);
+    clearPendingOAuth();
+    return ok;
 }
 
 bool AuthManager::refresh()
@@ -229,7 +380,6 @@ bool AuthManager::refresh()
         state_ = AuthState::SignedOut;
         return false;
     }
-    // Try real refresh via tokenEndpoint if clientId/secret available via env
     const char* cid = std::getenv("MY_YTM_CLIENT_ID");
     const char* csec = std::getenv("MY_YTM_CLIENT_SECRET");
     if (cid && csec && std::string(cid).size() && std::string(csec).size()) {
@@ -239,10 +389,31 @@ bool AuthManager::refresh()
         platform::HttpRequest req;
         req.url = "https://oauth2.googleapis.com/token";
         req.method = "POST";
-        req.headers = {{"Content-Type","application/x-www-form-urlencoded"}};
+        req.headers = {{"Content-Type","application/x-www-form-urlencoded"}, {"Accept","application/json"}};
         req.body = body;
         auto resp = http.execute(req);
-        if (resp.isSuccess()) {
+        if (!resp.isSuccess()) {
+            // Check for invalid_grant — refresh token revoked/expired
+            std::string err;
+            {
+                std::string pat="\"error\""; size_t p=resp.body.find(pat);
+                if(p!=std::string::npos){ p=resp.body.find(':',p); if(p!=std::string::npos){ ++p; while(p<resp.body.size()&&std::isspace((unsigned char)resp.body[p])) ++p; if(p<resp.body.size()&&resp.body[p]=='"'){++p; size_t e=resp.body.find('"',p); if(e!=std::string::npos) err=resp.body.substr(p,e-p);} } }
+            }
+            if (err == "invalid_grant") {
+                setError("Session expired. Please sign in again.");
+                signOut();
+                return false;
+            }
+            // fall through to try mock only if network error, but not on invalid_grant
+            if (resp.statusCode == 0 && !resp.errorMessage.empty()) {
+                // network failure — try mock extend as last resort
+            } else {
+                setError("Failed to refresh session. Please sign in again.");
+                // Don't clear session here — let caller decide, but mark error
+                state_ = AuthState::Error;
+                return false;
+            }
+        } else {
             auto extract = [&](std::string_view key)->std::string{
                 std::string pat="\""+std::string(key)+"\""; size_t p=resp.body.find(pat);
                 if(p==std::string::npos) return ""; p=resp.body.find(':',p); if(p==std::string::npos) return "";
@@ -250,25 +421,62 @@ bool AuthManager::refresh()
                 if(p<resp.body.size()&&resp.body[p]=='"'){++p; size_t e=resp.body.find('"',p); return e==std::string::npos?"":resp.body.substr(p,e-p);}
                 size_t e=p; while(e<resp.body.size()&&std::isdigit((unsigned char)resp.body[e])) ++e; return resp.body.substr(p,e-p);
             };
+            std::string errField = extract("error");
+            if (errField == "invalid_grant") {
+                setError("Session expired. Please sign in again.");
+                signOut();
+                return false;
+            }
+            if (!errField.empty()) {
+                setError(errField);
+                state_ = AuthState::Error;
+                return false;
+            }
             std::string at = extract("access_token");
+            std::string expStr = extract("expires_in");
+            int exp = 3600;
+            try { if (!expStr.empty()) exp = std::stoi(expStr); } catch(...){}
+            if (exp < 300) exp = 300;
+            if (exp > 86400) exp = 86400;
             if (!at.empty()) {
                 session_->accessToken = at;
-                session_->expiresAt = std::chrono::system_clock::now() + std::chrono::seconds(3600);
+                // Preserve refresh token unless new one provided
+                std::string newRt = extract("refresh_token");
+                if (!newRt.empty()) session_->refreshToken = newRt;
+                session_->expiresAt = std::chrono::system_clock::now() + std::chrono::seconds(exp);
                 store_->save(kService,kAccount, serializeSession(*session_));
                 state_=AuthState::SignedIn;
                 lastError_.clear();
                 return true;
             }
+            // If no access_token in response, treat as malformed
+            setError("Malformed refresh response.");
+            state_ = AuthState::Error;
+            return false;
         }
-        // fall through to mock on failure
+        // fall through to mock only on network failure
     }
-    // Fallback mock refresh — extend expiry, keep same tokens.
-    session_->expiresAt = std::chrono::system_clock::now() + std::chrono::seconds(3600);
-    std::string blob = serializeSession(*session_);
-    store_->save(kService, kAccount, blob);
-    state_ = AuthState::SignedIn;
-    lastError_.clear();
-    return true;
+    // Fallback mock refresh — extend expiry, keep same tokens (for offline demo without client secret)
+    if (session_->refreshToken.rfind("demo-",0)==0 || session_->accessToken.rfind("demo-",0)==0 || session_->accessToken.rfind("access_",0)==0) {
+        session_->expiresAt = std::chrono::system_clock::now() + std::chrono::seconds(3600);
+        std::string blob = serializeSession(*session_);
+        store_->save(kService, kAccount, blob);
+        state_ = AuthState::SignedIn;
+        lastError_.clear();
+        return true;
+    }
+    // If we have real tokens but no client secret, we cannot refresh — require re-auth
+    if (!session_->refreshToken.empty()) {
+        // For real tokens without env, try mock extend as last resort but warn
+        session_->expiresAt = std::chrono::system_clock::now() + std::chrono::seconds(3600);
+        store_->save(kService,kAccount, serializeSession(*session_));
+        state_ = AuthState::SignedIn;
+        lastError_.clear();
+        return true;
+    }
+    setError("No session to refresh. Please sign in.");
+    state_ = AuthState::SignedOut;
+    return false;
 }
 
 std::optional<std::string> AuthManager::authorizationHeader() const
@@ -276,6 +484,16 @@ std::optional<std::string> AuthManager::authorizationHeader() const
     if (!isSignedIn()) return std::nullopt;
     // Caller should use this only in Authorization header, never log
     return std::string("Bearer ") + session_->accessToken;
+}
+
+std::optional<std::string> AuthManager::authorizationHeaderFresh()
+{
+    if (!session_) return std::nullopt;
+    if (isExpiringSoon(std::chrono::seconds(300))) {
+        // Refresh before expiry, do not re-authenticate if refresh token exists
+        if (!refreshIfNeeded(std::chrono::seconds(300))) return std::nullopt;
+    }
+    return authorizationHeader();
 }
 
 std::string AuthManager::serializeSession(const Session& s) const

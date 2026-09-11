@@ -5,6 +5,7 @@
 #include "auth/session.h"
 #include "models/user_account.h"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -39,7 +40,7 @@ public:
         std::string clientId; // set via MY_YTM_CLIENT_ID env or config
         std::string clientSecret; // never logged
         std::string scope = "https://www.googleapis.com/auth/youtube";
-        std::string state; // random
+        std::string state; // if empty, cryptographically random per attempt
     };
 
     // Real loopback flow: spins up 127.0.0.1 ephemeral server, opens browser with
@@ -54,10 +55,15 @@ public:
     bool completeAuthWithCode(const std::string& code, const std::string& redirectUri, const OAuthConfig& cfg);
 
     bool signOut();
-    bool refresh(); // uses refreshToken to get new accessToken (mock in Phase 5)
+    bool refresh(); // uses refreshToken to get new accessToken
+    // Refresh proactively if expiring within window (e.g., 5 min) and refresh token exists
+    bool refreshIfNeeded(std::chrono::seconds window = std::chrono::seconds(300));
+    [[nodiscard]] bool isExpiringSoon(std::chrono::seconds window = std::chrono::seconds(300)) const noexcept;
 
     // Exposed for YouTubeClient to attach Authorization header without exposing token to UI/logs
+    // Automatically refreshes if expiring soon and refresh token available
     [[nodiscard]] std::optional<std::string> authorizationHeader() const;
+    [[nodiscard]] std::optional<std::string> authorizationHeaderFresh();
 
 private:
     static constexpr const char* kService = "MyYtm";
@@ -67,12 +73,18 @@ private:
     std::optional<Session> deserializeSession(const std::string& blob) const;
 
     void setError(std::string msg);
+    void clearPendingOAuth() noexcept;
 
     AuthState state_ = AuthState::SignedOut;
     std::optional<Session> session_;
     std::string lastError_;
     std::unique_ptr<ICredentialStore> store_;
     BrowserLauncher launcher_;
+
+    // Per-attempt OAuth data — never logged, cleared after use
+    std::string pendingState_;
+    std::string pendingVerifier_;
+    std::string pendingChallenge_;
 };
 
 } // namespace myytm::auth

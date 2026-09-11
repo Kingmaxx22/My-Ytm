@@ -20,6 +20,10 @@ struct Session {
     {
         return std::chrono::system_clock::now() >= expiresAt;
     }
+    [[nodiscard]] bool isExpiringSoon(std::chrono::seconds window) const noexcept
+    {
+        return std::chrono::system_clock::now() + window >= expiresAt;
+    }
     [[nodiscard]] bool hasTokens() const noexcept
     {
         return !accessToken.empty() && !refreshToken.empty();
